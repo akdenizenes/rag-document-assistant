@@ -1,10 +1,12 @@
-"""ORM modelleri: User, Document, DocumentChunk (pgvector 384 boyut)."""
+"""ORM modelleri: User, Document, DocumentChunk (pgvector 384 boyut + Türkçe FTS)."""
 
 import enum
 from datetime import datetime
+from typing import Any
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
+    Computed,
     DateTime,
     ForeignKey,
     Index,
@@ -14,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -22,6 +25,13 @@ EMBEDDING_DIM = 384
 
 
 class DocumentStatus(str, enum.Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class SummaryStatus(str, enum.Enum):
     PENDING = "pending"
     PROCESSING = "processing"
     COMPLETED = "completed"
@@ -66,6 +76,17 @@ class Document(Base):
         String(20), default=DocumentStatus.PENDING.value, index=True
     )
     error_message: Mapped[str | None] = mapped_column(Text)
+
+    # Adım 1: Belge Özeti, Metaveri ve Tam Metin Altyapısı
+    full_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    doc_metadata: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True, default=dict
+    )
+    summary_status: Mapped[str] = mapped_column(
+        String(20), default=SummaryStatus.PENDING.value, index=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -92,6 +113,13 @@ class DocumentChunk(Base):
     page_number: Mapped[int | None] = mapped_column(Integer)
     content: Mapped[str] = mapped_column(Text)
     embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM))
+
+    # Adım 3: Otomatik üretilen Türkçe tsvector sütunu
+    content_tsv: Mapped[str] = mapped_column(
+        TSVECTOR,
+        Computed("to_tsvector('turkish', coalesce(content, ''))", persisted=True),
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
@@ -107,6 +135,12 @@ class DocumentChunk(Base):
             postgresql_using="hnsw",
             postgresql_with={"m": 16, "ef_construction": 64},
             postgresql_ops={"embedding": "vector_cosine_ops"},
+        ),
+        # Türkçe Full-Text Search için GIN indeksi
+        Index(
+            "ix_document_chunks_content_tsv",
+            "content_tsv",
+            postgresql_using="gin",
         ),
     )
 

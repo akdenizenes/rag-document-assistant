@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import json
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 import httpx
@@ -88,7 +89,7 @@ class ApiClient:
         self._request("DELETE", f"/documents/{document_id}")
 
     # --- sohbet ---
-    def chat(
+    def _build_chat_payload(
         self,
         question: str,
         *,
@@ -107,6 +108,73 @@ class ApiClient:
             payload["document_id"] = document_id
         if top_k is not None:
             payload["top_k"] = top_k
+        return payload
+
+    def chat(
+        self,
+        question: str,
+        *,
+        document_id: int | None = None,
+        history: Sequence[dict[str, Any]] = (),
+        top_k: int | None = None,
+    ) -> dict[str, Any]:
+        payload = self._build_chat_payload(
+            question, document_id=document_id, history=history, top_k=top_k
+        )
         return self._request(
             "POST", "/chat", json=payload, timeout=self._chat_timeout
         ).json()
+
+    def chat_stream(
+        self,
+        question: str,
+        *,
+        document_id: int | None = None,
+        history: Sequence[dict[str, Any]] = (),
+        top_k: int | None = None,
+        on_sources: Callable[[dict[str, Any]], None] | None = None,
+    ) -> Iterator[str]:
+        """SSE (/chat/stream) üzerinden canlı metin parçalarını (token) yield eder.
+        İlk gelen `sources` olayında `on_sources` callback'ini çağırır (sources, route, model içerir).
+        """
+        payload = self._build_chat_payload(
+            question, document_id=document_id, history=history, top_k=top_k
+        )
+        try:
+            with self._client.stream(
+                "POST",
+                "/chat/stream",
+                json=payload,
+                timeout=self._chat_timeout,
+            ) as resp:
+                if resp.status_code >= 400:
+                    resp.read()
+                    raise ApiError(_extract_detail(resp))
+
+                for line in resp.iter_lines():
+                    if not line or not line.startswith("data: "):
+                        continue
+                    raw_data = line[6:].strip()
+                    if not raw_data:
+                        continue
+                    event = json.loads(raw_data)
+                    ev_type = event.get("type")
+
+                    if ev_type == "sources" and on_sources is not None:
+                        on_sources(event)
+                    elif ev_type == "token":
+                        content = event.get("content", "")
+                        if content:
+                            yield content
+                    elif ev_type == "error":
+                        raise ApiError(event.get("detail", "Akış sırasında hata oluştu."))
+                    elif ev_type == "done":
+                        break
+        except httpx.ConnectError as exc:
+            raise ApiError(
+                f"API'ye bağlanılamadı ({self.base_url}). Sunucu çalışıyor mu?"
+            ) from exc
+        except httpx.TimeoutException as exc:
+            raise ApiError("API zamanında yanıt vermedi (zaman aşımı).") from exc
+        except httpx.HTTPError as exc:
+            raise ApiError(f"İstek başarısız oldu: {exc}") from exc

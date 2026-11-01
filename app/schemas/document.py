@@ -1,6 +1,7 @@
 """Belge endpoint'leri için Pydantic şemaları."""
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -15,6 +16,9 @@ class DocumentOut(BaseModel):
     page_count: int
     status: str  # pending | processing | completed | failed
     error_message: str | None = None
+    summary: str | None = None
+    doc_metadata: dict[str, Any] | None = None
+    summary_status: str = "pending"
     created_at: datetime
     chunk_count: int = 0
 

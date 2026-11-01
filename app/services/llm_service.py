@@ -1,4 +1,4 @@
-"""LLM istemcisi.
+"""LLM istemcisi (Normal + SSE Streaming + Belge Özet/Metaveri Çıkarımı).
 
 Desteklenen sağlayıcılar (LLM_PROVIDER):
   - ollama   : yerel, ücretsiz           (httpx, POST /api/chat)
@@ -10,9 +10,14 @@ Sağlayıcı, model ve anahtar .env üzerinden seçilir (LLM_PROVIDER, LLM_MODEL
 `google-genai` yalnızca LLM_PROVIDER=gemini iken import edilir.
 """
 
+import json
 import logging
+import re
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import httpx
+from pydantic import BaseModel
 
 from app.config import (
     LLM_API_KEY,
@@ -24,6 +29,7 @@ from app.config import (
     LLM_TEMPERATURE,
     LLM_TIMEOUT_SECONDS,
 )
+from app.services.prompts import DOCUMENT_METADATA_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +44,17 @@ class LLMError(Exception):
         self.status_code = status_code
 
 
+class _GeminiSummarySchema(BaseModel):
+    summary: str
+    title: str
+    document_type: str
+    main_topics: list[str]
+    question_count: int
+    section_count: int
+
+
 # --------------------------------------------------------------------------- #
-# httpx tabanlı sağlayıcılar
+# httpx tabanlı sağlayıcılar (Senkron Tek Yanıt & Streaming)
 # --------------------------------------------------------------------------- #
 async def _call_ollama(client: httpx.AsyncClient, messages: Messages) -> str:
     resp = await client.post(
@@ -59,6 +74,34 @@ async def _call_ollama(client: httpx.AsyncClient, messages: Messages) -> str:
     return resp.json()["message"]["content"]
 
 
+async def _stream_ollama(messages: Messages) -> AsyncGenerator[str, None]:
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(LLM_TIMEOUT_SECONDS, connect=10.0)
+    ) as client:
+        async with client.stream(
+            "POST",
+            f"{LLM_BASE_URL}/api/chat",
+            json={
+                "model": LLM_MODEL,
+                "messages": messages,
+                "stream": True,
+                "options": {
+                    "temperature": LLM_TEMPERATURE,
+                    "num_predict": LLM_MAX_TOKENS,
+                    "num_ctx": LLM_NUM_CTX,
+                },
+            },
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.strip():
+                    continue
+                data = json.loads(line)
+                token = data.get("message", {}).get("content", "")
+                if token:
+                    yield token
+
+
 async def _call_openai(client: httpx.AsyncClient, messages: Messages) -> str:
     if not LLM_API_KEY and "api.openai.com" in LLM_BASE_URL:
         raise LLMError("LLM_API_KEY tanımlı değil (.env dosyasını kontrol et).", 503)
@@ -75,6 +118,38 @@ async def _call_openai(client: httpx.AsyncClient, messages: Messages) -> str:
     )
     resp.raise_for_status()
     return resp.json()["choices"][0]["message"]["content"]
+
+
+async def _stream_openai(messages: Messages) -> AsyncGenerator[str, None]:
+    if not LLM_API_KEY and "api.openai.com" in LLM_BASE_URL:
+        raise LLMError("LLM_API_KEY tanımlı değil (.env dosyasını kontrol et).", 503)
+    headers = {"Authorization": f"Bearer {LLM_API_KEY}"} if LLM_API_KEY else {}
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(LLM_TIMEOUT_SECONDS, connect=10.0)
+    ) as client:
+        async with client.stream(
+            "POST",
+            f"{LLM_BASE_URL}/chat/completions",
+            headers=headers,
+            json={
+                "model": LLM_MODEL,
+                "messages": messages,
+                "temperature": LLM_TEMPERATURE,
+                "max_tokens": LLM_MAX_TOKENS,
+                "stream": True,
+            },
+        ) as resp:
+            resp.raise_for_status()
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:].strip()
+                if payload == "[DONE]":
+                    break
+                data = json.loads(payload)
+                delta = data.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if delta:
+                    yield delta
 
 
 async def _call_anthropic(client: httpx.AsyncClient, messages: Messages) -> str:
@@ -96,6 +171,11 @@ async def _call_anthropic(client: httpx.AsyncClient, messages: Messages) -> str:
     resp.raise_for_status()
     blocks = resp.json()["content"]
     return "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+
+
+async def _stream_anthropic(messages: Messages) -> AsyncGenerator[str, None]:
+    text = await _dispatch(messages)
+    yield text
 
 
 _HTTP_PROVIDERS = {
@@ -127,18 +207,13 @@ def _get_gemini_client():
 
         _gemini_client = genai.Client(
             api_key=LLM_API_KEY,
-            # SDK zaman aşımını milisaniye cinsinden bekler.
             http_options=types.HttpOptions(timeout=int(LLM_TIMEOUT_SECONDS * 1000)),
         )
     return _gemini_client
 
 
 def _to_gemini_contents(messages: Messages, types) -> tuple[str | None, list]:
-    """OpenAI tarzı mesajları Gemini biçimine çevirir.
-
-    - 'system' mesajları -> system_instruction
-    - 'assistant' rolü   -> 'model'
-    """
+    """OpenAI tarzı mesajları Gemini biçimine çevirir."""
     system = "\n\n".join(m["content"] for m in messages if m["role"] == "system") or None
     contents = [
         types.Content(
@@ -151,24 +226,10 @@ def _to_gemini_contents(messages: Messages, types) -> tuple[str | None, list]:
     return system, contents
 
 
-async def _call_gemini(messages: Messages) -> str:
-    client = _get_gemini_client()
+def _handle_gemini_error(exc: Exception) -> None:
     from google.genai import errors as genai_errors
-    from google.genai import types
 
-    system, contents = _to_gemini_contents(messages, types)
-
-    try:
-        response = await client.aio.models.generate_content(
-            model=LLM_MODEL,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=system,
-                temperature=LLM_TEMPERATURE,
-                max_output_tokens=LLM_MAX_TOKENS,
-            ),
-        )
-    except genai_errors.APIError as exc:
+    if isinstance(exc, genai_errors.APIError):
         code = getattr(exc, "code", None)
         message = str(getattr(exc, "message", None) or exc)
         logger.error("Gemini API hatası (%s): %s", code, message)
@@ -183,12 +244,30 @@ async def _call_gemini(messages: Messages) -> str:
             raise LLMError(
                 "Gemini kota/istek sınırı aşıldı. Biraz bekleyip tekrar dene.", 429
             ) from exc
-        
-        # 404 dahil tüm diğer hatalarda Google'ın fırlattığı gerçek API mesajını doğrudan göster:
         raise LLMError(f"Gemini API Hatası ({code}): {message}", 502) from exc
+
+    logger.exception("Beklenmeyen Gemini hatası")
+    raise LLMError(f"Beklenmeyen Hata: {type(exc).__name__} - {str(exc)}", 502) from exc
+
+
+async def _call_gemini(messages: Messages) -> str:
+    client = _get_gemini_client()
+    from google.genai import types
+
+    system, contents = _to_gemini_contents(messages, types)
+
+    try:
+        response = await client.aio.models.generate_content(
+            model=LLM_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=LLM_TEMPERATURE,
+                max_output_tokens=LLM_MAX_TOKENS,
+            ),
+        )
     except Exception as exc:
-        logger.exception("Beklenmeyen Gemini hatası")
-        raise LLMError(f"Beklenmeyen Hata: {type(exc).__name__} - {str(exc)}", 502) from exc
+        _handle_gemini_error(exc)
 
     text = response.text
     if not text:
@@ -202,8 +281,31 @@ async def _call_gemini(messages: Messages) -> str:
     return text
 
 
+async def _stream_gemini(messages: Messages) -> AsyncGenerator[str, None]:
+    client = _get_gemini_client()
+    from google.genai import types
+
+    system, contents = _to_gemini_contents(messages, types)
+
+    try:
+        stream = await client.aio.models.generate_content_stream(
+            model=LLM_MODEL,
+            contents=contents,
+            config=types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=LLM_TEMPERATURE,
+                max_output_tokens=LLM_MAX_TOKENS,
+            ),
+        )
+        async for chunk in stream:
+            if chunk.text:
+                yield chunk.text
+    except Exception as exc:
+        _handle_gemini_error(exc)
+
+
 # --------------------------------------------------------------------------- #
-# Ortak giriş noktası
+# Ortak giriş noktaları: generate, generate_stream, generate_document_summary
 # --------------------------------------------------------------------------- #
 async def _dispatch(messages: Messages) -> str:
     if LLM_PROVIDER == "gemini":
@@ -241,3 +343,66 @@ async def generate(messages: Messages) -> str:
     if not text:
         raise LLMError("LLM boş yanıt döndürdü.")
     return text
+
+
+async def generate_stream(messages: Messages) -> AsyncGenerator[str, None]:
+    """Mesaj listesini seçili LLM'e gönderir ve yanıtı parça parça (stream) üretir."""
+    try:
+        if LLM_PROVIDER == "gemini":
+            async for token in _stream_gemini(messages):
+                yield token
+        elif LLM_PROVIDER == "ollama":
+            async for token in _stream_ollama(messages):
+                yield token
+        elif LLM_PROVIDER == "openai":
+            async for token in _stream_openai(messages):
+                yield token
+        else:
+            async for token in _stream_anthropic(messages):
+                yield token
+    except LLMError:
+        raise
+    except Exception as exc:
+        logger.exception("Streaming sırasında LLM hatası")
+        raise LLMError(f"Akış hatası: {exc}", 502) from exc
+
+
+async def generate_document_summary(
+    full_text: str,
+    filename: str = "",
+    page_count: int = 0,
+) -> tuple[str, dict[str, Any]]:
+    """Belgenin tam metninden Türkçe kısa özet ve temel metaveriler üretir (Adım 1)."""
+    prompt = DOCUMENT_METADATA_EXTRACTION_PROMPT.format(
+        filename=filename,
+        page_count=page_count,
+        full_text=full_text,
+    )
+
+    if LLM_PROVIDER == "gemini":
+        client = _get_gemini_client()
+        from google.genai import types
+
+        try:
+            response = await client.aio.models.generate_content(
+                model=LLM_MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=2048,
+                    response_mime_type="application/json",
+                    response_schema=_GeminiSummarySchema,
+                ),
+            )
+            data = json.loads(response.text or "{}")
+            summary = str(data.pop("summary", "")).strip()
+            return summary, data
+        except Exception as exc:
+            _handle_gemini_error(exc)
+
+    # Diğer sağlayıcılar için JSON parse fallback
+    raw = await generate([{"role": "user", "content": prompt}])
+    cleaned = re.sub(r"^```(?:json)?|```$", "", raw.strip(), flags=re.MULTILINE).strip()
+    data = json.loads(cleaned)
+    summary = str(data.pop("summary", "")).strip()
+    return summary, data

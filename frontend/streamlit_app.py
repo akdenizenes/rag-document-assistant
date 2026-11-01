@@ -1,10 +1,7 @@
-"""RAG Belge Asistanı - Streamlit arayüzü.
+"""RAG Belge Asistanı - Streamlit arayüzü (SSE Canlı Akış + Rota & Özet/Metaveri Desteği).
 
 Çalıştırma (proje kökünden, API'nin ayakta olduğundan emin ol):
     streamlit run frontend/streamlit_app.py
-
-Ayarlar .env dosyasından okunur: API_BASE_URL, STATUS_POLL_SECONDS, API_TIMEOUT_SECONDS,
-CHAT_TIMEOUT_SECONDS, DEFAULT_TOP_K, MAX_UPLOAD_MB.
 """
 
 from __future__ import annotations
@@ -12,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import streamlit as st
 from dotenv import load_dotenv
@@ -34,14 +32,16 @@ STATUS_LABELS = {
     "completed": "✅ Hazır",
     "failed": "❌ Hata",
 }
+ROUTE_LABELS = {
+    "summary": "📋 Özet Rotası (Doğrudan Özet)",
+    "full_text": "📖 Tam Metin Rotası (Sayma / Tarama)",
+    "hybrid": "🔍 Hibrit Arama Rotası (pgvector + FTS RRF)",
+}
 PENDING_STATUSES = {"pending", "processing"}
 
 st.set_page_config(page_title="RAG Belge Asistanı", page_icon="📄", layout="wide")
 
 
-# --------------------------------------------------------------------------- #
-# Yardımcılar
-# --------------------------------------------------------------------------- #
 @st.cache_resource
 def get_api() -> ApiClient:
     return ApiClient(
@@ -54,11 +54,11 @@ def get_api() -> ApiClient:
 
 def init_state() -> None:
     state = st.session_state
-    state.setdefault("docs", [])  # son bilinen belge listesi
-    state.setdefault("chats", {})  # {kapsam (belge id veya None): [mesajlar]}
-    state.setdefault("uploader_key", 0)  # yükleme alanını sıfırlamak için
-    state.setdefault("flash", [])  # rerun sonrası gösterilecek mesajlar
-    state.setdefault("scope", None)  # sohbet kapsamı: None = tüm belgeler
+    state.setdefault("docs", [])
+    state.setdefault("chats", {})
+    state.setdefault("uploader_key", 0)
+    state.setdefault("flash", [])
+    state.setdefault("scope", None)
     state.setdefault("_polling", False)
     state.setdefault("_has_pending", False)
 
@@ -111,12 +111,12 @@ def render_upload() -> None:
 
     if uploaded:
         flash("success", f"{uploaded} dosya yüklendi, işleme başladı.")
-        st.session_state.uploader_key += 1  # yükleme alanını temizle
+        st.session_state.uploader_key += 1
     st.rerun()
 
 
 def render_documents() -> None:
-    """Belge listesi. Bekleyen belge varken kendi kendini yeniler (fragment)."""
+    """Belge listesi. Bekleyen belge veya özet varken kendi kendini yeniler."""
     api = get_api()
     try:
         docs = api.list_documents()
@@ -126,16 +126,17 @@ def render_documents() -> None:
 
     state = st.session_state
     completed_ids = frozenset(d["id"] for d in docs if d["status"] == "completed")
-    has_pending = any(d["status"] in PENDING_STATUSES for d in docs)
+    has_pending = any(
+        d["status"] in PENDING_STATUSES
+        or (d["status"] == "completed" and d.get("summary_status") in PENDING_STATUSES)
+        for d in docs
+    )
     previous_completed = state.get("_completed_ids")
 
     state.docs = docs
     state._completed_ids = completed_ids
     state._has_pending = has_pending
 
-    # Tam sayfa yenilemesi gerekiyor mu?
-    #  - yenileme modu (bekleyen belge var/yok) değiştiyse -> run_every'yi güncelle
-    #  - hazır belgeler değiştiyse -> sohbet kapsamı listesini güncelle
     needs_rerun = has_pending != state._polling or (
         previous_completed is not None and previous_completed != completed_ids
     )
@@ -151,10 +152,23 @@ def render_documents() -> None:
             parts = [STATUS_LABELS.get(doc["status"], doc["status"])]
             if doc["status"] == "completed":
                 parts += [f"{doc['page_count']} sayfa", f"{doc['chunk_count']} parça"]
+                sum_status = doc.get("summary_status", "pending")
+                if sum_status == "completed":
+                    parts.append("✨ Özet hazır")
+                elif sum_status in PENDING_STATUSES:
+                    parts.append("⏳ Özetleniyor")
             parts.append(fmt_size(doc["file_size"]))
             st.caption(" · ".join(parts))
+
             if doc["status"] == "failed" and doc.get("error_message"):
                 st.caption(f":red[{doc['error_message']}]")
+
+            if doc.get("summary"):
+                with st.expander("📋 Belge Özeti ve Metaveri"):
+                    st.write(doc["summary"])
+                    meta = doc.get("doc_metadata") or {}
+                    if meta:
+                        st.json(meta)
 
             with st.popover("🗑️ Sil"):
                 st.write("Belge ve tüm parçaları kalıcı olarak silinecek.")
@@ -178,7 +192,6 @@ def render_sidebar() -> int:
         render_upload()
         st.divider()
 
-        # Bekleyen belge varsa fragment POLL_SECONDS'ta bir kendini yeniler.
         polling = bool(st.session_state._has_pending)
         st.session_state._polling = polling
         st.fragment(run_every=POLL_SECONDS if polling else None)(render_documents)()
@@ -189,7 +202,7 @@ def render_sidebar() -> int:
             min_value=1,
             max_value=10,
             value=min(max(DEFAULT_TOP_K, 1), 10),
-            help="Cevap için belgeden kaç parça getirileceği. Yüksek değer daha geniş bağlam, daha uzun süre demektir.",
+            help="Hibrit aramada belgeden kaç parça getirileceği.",
         )
     return top_k
 
@@ -197,12 +210,16 @@ def render_sidebar() -> int:
 # --------------------------------------------------------------------------- #
 # Ana alan: sohbet
 # --------------------------------------------------------------------------- #
-def render_sources(sources: list[dict]) -> None:
+def render_sources(sources: list[dict], route: str = "hybrid") -> None:
     if not sources:
         return
-    with st.expander(f"📎 Kaynaklar ({len(sources)})"):
+    with st.expander(f"📎 Kaynaklar ({len(sources)}) · {ROUTE_LABELS.get(route, route)}"):
         for index, source in enumerate(sources, start=1):
-            page = f"sayfa {source['page_number']}" if source.get("page_number") else "sayfa belirtilmemiş"
+            page = (
+                f"sayfa {source['page_number']}"
+                if source.get("page_number")
+                else "sayfa belirtilmemiş"
+            )
             st.markdown(
                 f"**[{index}] {source['document_name']}** · {page} · skor `{source['score']:.2f}`"
             )
@@ -214,18 +231,24 @@ def render_message(message: dict) -> None:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
         if message["role"] == "assistant":
-            render_sources(message.get("sources", []))
+            route = message.get("route", "hybrid")
+            render_sources(message.get("sources", []), route=route)
+            caption_parts = []
             if message.get("model"):
-                st.caption(f"Model: {message['model']}")
+                caption_parts.append(f"Model: {message['model']}")
+            if route:
+                caption_parts.append(ROUTE_LABELS.get(route, route))
+            if caption_parts:
+                st.caption(" · ".join(caption_parts))
 
 
 def render_chat(top_k: int) -> None:
     state = st.session_state
     ready = [d for d in state.docs if d["status"] == "completed"]
     names = {d["id"]: d["filename"] for d in ready}
-    options = [None, *names]  # None = tüm belgelerde ara
+    options = [None, *names]
 
-    if state.scope not in options:  # seçili belge silinmiş olabilir
+    if state.scope not in options:
         state.scope = None
 
     col_scope, col_clear = st.columns([4, 1], vertical_alignment="bottom")
@@ -246,7 +269,10 @@ def render_chat(top_k: int) -> None:
     if not ready:
         st.info("Başlamak için soldan bir PDF yükle. İşlem bitince burada soru sorabilirsin.")
     elif not history:
-        st.caption("Seçili kapsamdaki belgeler hakkında bir soru sor. Takip soruları da sorabilirsin.")
+        st.caption(
+            "Seçili kapsamdaki belgeler hakkında soru sorabilirsin (Örn: 'Bu belgeyi özetle', "
+            "'Toplam kaç soru var?', veya spesifik bir konu)."
+        )
 
     for message in history:
         render_message(message)
@@ -257,31 +283,54 @@ def render_chat(top_k: int) -> None:
 
     with st.chat_message("user"):
         st.markdown(prompt)
+
     with st.chat_message("assistant"):
+        stream_meta: dict[str, Any] = {
+            "sources": [],
+            "route": "hybrid",
+            "model": "",
+        }
+        sources_placeholder = st.empty()
+
+        def _on_sources(event: dict[str, Any]) -> None:
+            stream_meta["sources"] = event.get("sources", [])
+            stream_meta["route"] = event.get("route", "hybrid")
+            stream_meta["model"] = event.get("model", "")
+
         try:
-            with st.spinner("Belgelerde aranıyor ve cevap hazırlanıyor..."):
-                result = get_api().chat(
-                    prompt, document_id=scope, history=history, top_k=top_k
+            answer_text = st.write_stream(
+                get_api().chat_stream(
+                    prompt,
+                    document_id=scope,
+                    history=history,
+                    top_k=top_k,
+                    on_sources=_on_sources,
                 )
+            )
         except ApiError as exc:
             st.error(str(exc))
             return
-        st.markdown(result["answer"])
-        render_sources(result["sources"])
-        st.caption(f"Model: {result['model']}")
+
+        with sources_placeholder.container():
+            render_sources(stream_meta["sources"], route=stream_meta["route"])
+        caption_parts = []
+        if stream_meta["model"]:
+            caption_parts.append(f"Model: {stream_meta['model']}")
+        caption_parts.append(ROUTE_LABELS.get(stream_meta["route"], stream_meta["route"]))
+        st.caption(" · ".join(caption_parts))
 
     history.append({"role": "user", "content": prompt})
     history.append(
         {
             "role": "assistant",
-            "content": result["answer"],
-            "sources": result["sources"],
-            "model": result["model"],
+            "content": str(answer_text),
+            "sources": stream_meta["sources"],
+            "model": stream_meta["model"],
+            "route": stream_meta["route"],
         }
     )
 
 
-# --------------------------------------------------------------------------- #
 def main() -> None:
     init_state()
     st.title("📄 RAG Belge Asistanı")

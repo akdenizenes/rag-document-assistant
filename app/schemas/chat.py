@@ -4,6 +4,8 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+RouteType = Literal["summary", "full_text", "hybrid"]
+
 
 class ChatMessage(BaseModel):
     """Konuşma geçmişindeki tek bir mesaj."""
@@ -56,7 +58,7 @@ class SourceChunk(BaseModel):
     document_name: str
     chunk_index: int
     page_number: int | None = None
-    score: float = Field(description="Kosinüs benzerliği (1'e yakın = daha ilgili)")
+    score: float = Field(description="Benzerlik veya RRF skoru")
     content: str
 
 
@@ -64,4 +66,8 @@ class QueryResponse(BaseModel):
     answer: str
     sources: list[SourceChunk]
     model: str = Field(description="Cevabı üreten LLM modeli")
+    route: RouteType = Field(
+        default="hybrid",
+        description="Sorgunun yönlendirildiği rota: summary | full_text | hybrid",
+    )
     document_id: int | None = None
