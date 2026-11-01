@@ -20,10 +20,11 @@ from app.config import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import Document, DocumentChunk, DocumentStatus, User
+from app.rate_limit import limit_default, limit_upload
 from app.schemas.document import DocumentList, DocumentOut
 from app.services.document_service import delete_file, process_document, save_file
 
-router = APIRouter(tags=["documents"])
+router = APIRouter(tags=["documents"], dependencies=[Depends(limit_default)])
 
 
 def _to_out(doc: Document, chunk_count: int = 0) -> DocumentOut:
@@ -54,7 +55,12 @@ async def _get_owned_document(db: AsyncSession, user: User, document_id: int) ->
     return doc
 
 
-@router.post("/upload", response_model=DocumentOut, status_code=status.HTTP_202_ACCEPTED)
+@router.post(
+    "/upload",
+    response_model=DocumentOut,
+    status_code=status.HTTP_202_ACCEPTED,
+    dependencies=[Depends(limit_upload)],
+)
 async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(..., description="Yüklenecek PDF dosyası"),

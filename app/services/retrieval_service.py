@@ -1,14 +1,36 @@
-"""Hibrit Arama: pgvector (kosinüs benzerliği) + PostgreSQL Full-Text Search (Türkçe) + RRF."""
+"""Arama katmanı: vektör benzerliği (pgvector) + Türkçe tam metin araması (PostgreSQL FTS).
+
+İki giriş noktası vardır:
+  - search_similar_chunks : yalnızca vektör araması (kosinüs mesafesi)
+  - hybrid_search_chunks  : vektör + FTS, Reciprocal Rank Fusion (RRF) ile birleştirilir
+
+Hibrit arama neden? Vektör araması anlamı yakalar ama "Soru 7", "Ohm", "RS-232" gibi tam
+terimlerde zayıf kalabilir; tam metin araması tam terimi yakalar ama eş anlamlıyı kaçırır.
+RRF yalnızca SIRALARI birleştirdiği için iki farklı skor ölçeğini normalize etmek gerekmez.
+"""
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-from sqlalchemy import select, text
+from sqlalchemy import Float, Text, cast, func, literal_column, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.types import UserDefinedType
 
-from app.config import HNSW_EF_SEARCH, RETRIEVAL_MIN_SCORE, RETRIEVAL_TOP_K
+from app.config import (
+    HNSW_EF_SEARCH,
+    HYBRID_CANDIDATES,
+    HYBRID_FTS_MIN_SCORE,
+    HYBRID_FTS_WEIGHT,
+    HYBRID_RRF_K,
+    HYBRID_VECTOR_WEIGHT,
+    RETRIEVAL_MIN_SCORE,
+    RETRIEVAL_TOP_K,
+)
 from app.models import Document, DocumentChunk, DocumentStatus
 from app.services.embedding_service import embed_texts_async
+from app.services.fusion import fuse_ranked_chunks
 
 logger = logging.getLogger(__name__)
 
@@ -21,23 +43,54 @@ class RetrievedChunk:
     chunk_index: int
     page_number: int | None
     content: str
-    score: float  # kosinüs benzerliği veya RRF birleşik skoru
+    score: float  # kosinüs benzerliği = 1 - kosinüs mesafesi
+    # Hibrit aramada RRF skoru (sıralama bununla yapılır); vektör aramada None.
+    rrf_score: float | None = None
+    # Parçanın nereden geldiği: vector | fts | both | summary | full_text
+    matched_by: str = "vector"
+    # cross_encoder modunda yeniden sıralama skoru (model ölçeğinde ham skor); diğerlerinde None
+    rerank_score: float | None = None
 
 
-async def search_similar_chunks(
-    db: AsyncSession,
-    *,
-    user_id: int,
-    query: str,
-    document_id: int | None = None,
-    top_k: int = RETRIEVAL_TOP_K,
-    min_score: float = RETRIEVAL_MIN_SCORE,
-) -> list[RetrievedChunk]:
-    """Yalnızca vektör benzerlik araması yapar (fallback veya saf semantik arama için)."""
-    [query_vector] = await embed_texts_async([query])
+class _TSQuery(UserDefinedType):
+    """PostgreSQL `tsquery` türü (CAST için)."""
 
-    distance = DocumentChunk.embedding.cosine_distance(query_vector).label("distance")
-    stmt = (
+    cache_ok = True
+
+    def get_col_spec(self, **kw) -> str:
+        return "TSQUERY"
+
+
+# Sabit bir literal olarak gömülür (bind parametresi DEĞİL): asyncpg `regconfig` türünü
+# str'den kodlayamaz; literal ise PostgreSQL tarafında doğrudan regconfig'e çözülür.
+_TS_CONFIG = literal_column("'turkish'")
+
+
+def _or_tsquery(query: str):
+    """Doğal dil sorusunu VEYA (|) mantığıyla birleştirilmiş tsquery'ye çevirir.
+
+    `plainto_tsquery` terimleri VE (&) ile bağlar; uzun bir soruda bu neredeyse hiçbir parçayla
+    eşleşmez. Burada & -> | yapılır, sıralamayı (ts_rank_cd) çok terimle eşleşen parçalar kazanır.
+    Türkçe sözlük durak sözcükleri (ve, bir, bu ...) ve ekleri (stemming) zaten ayıklar.
+    """
+    strict = func.plainto_tsquery(_TS_CONFIG, query)
+    return cast(func.replace(cast(strict, Text), " & ", " | "), _TSQuery())
+
+
+def _row_to_chunk(row, *, score: float) -> RetrievedChunk:
+    return RetrievedChunk(
+        chunk_id=row.id,
+        document_id=row.document_id,
+        document_name=row.filename,
+        chunk_index=row.chunk_index,
+        page_number=row.page_number,
+        content=row.content,
+        score=score,
+    )
+
+
+def _base_select(*extra):
+    return (
         select(
             DocumentChunk.id,
             DocumentChunk.document_id,
@@ -45,35 +98,93 @@ async def search_similar_chunks(
             DocumentChunk.chunk_index,
             DocumentChunk.page_number,
             DocumentChunk.content,
-            distance,
+            *extra,
         )
         .join(Document, Document.id == DocumentChunk.document_id)
-        .where(
-            Document.user_id == user_id,
-            Document.status == DocumentStatus.COMPLETED.value,
-        )
-        .order_by(distance)
-        .limit(top_k)
+        .where(Document.status == DocumentStatus.COMPLETED.value)
     )
-    if document_id is not None:
-        stmt = stmt.where(DocumentChunk.document_id == document_id)
 
+
+def _scope(stmt, user_id: int, document_ids: Sequence[int] | None):
+    """Kullanıcının belgeleriyle sınırlar; `document_ids` doluysa yalnızca o belgelerde arar."""
+    stmt = stmt.where(Document.user_id == user_id)
+    if document_ids:
+        stmt = stmt.where(DocumentChunk.document_id.in_(list(document_ids)))
+    return stmt
+
+
+async def _vector_search(
+    db: AsyncSession,
+    query_vector: list[float],
+    *,
+    user_id: int,
+    document_ids: Sequence[int] | None,
+    limit: int,
+) -> list[RetrievedChunk]:
+    """En yakın `limit` parçayı kosinüs mesafesine göre döner (eşik UYGULANMAZ)."""
+    distance = DocumentChunk.embedding.cosine_distance(query_vector).label("distance")
+    stmt = _scope(_base_select(distance), user_id, document_ids).order_by(distance).limit(limit)
+
+    # HNSW indeksinin bu sorgu için baktığı aday sayısı (yalnızca bu transaction için).
     await db.execute(text(f"SET LOCAL hnsw.ef_search = {int(HNSW_EF_SEARCH)}"))
     rows = (await db.execute(stmt)).all()
+    return [_row_to_chunk(r, score=round(1.0 - float(r.distance), 4)) for r in rows]
 
-    results = [
-        RetrievedChunk(
-            chunk_id=row.id,
-            document_id=row.document_id,
-            document_name=row.filename,
-            chunk_index=row.chunk_index,
-            page_number=row.page_number,
-            content=row.content,
-            score=round(1.0 - float(row.distance), 4),
-        )
-        for row in rows
-    ]
-    return [r for r in results if r.score >= min_score]
+
+async def _fts_search(
+    db: AsyncSession,
+    query: str,
+    query_vector: list[float],
+    *,
+    user_id: int,
+    document_ids: Sequence[int] | None,
+    limit: int,
+) -> list[RetrievedChunk]:
+    """Türkçe tam metin aramasıyla en alakalı `limit` parçayı döner (ts_rank_cd sırasıyla).
+
+    Bulunan parçaların `score` alanı yine kosinüs benzerliğidir (arayüzde tutarlı skor için).
+    """
+    ts_query = _or_tsquery(query)
+    fts_rank = func.ts_rank_cd(DocumentChunk.content_tsv, ts_query, type_=Float).label("fts_rank")
+    distance = DocumentChunk.embedding.cosine_distance(query_vector).label("distance")
+    stmt = (
+        _scope(_base_select(distance, fts_rank), user_id, document_ids)
+        .where(DocumentChunk.content_tsv.op("@@", is_comparison=True)(ts_query))
+        .order_by(fts_rank.desc(), DocumentChunk.id)
+        .limit(limit)
+    )
+    rows = (await db.execute(stmt)).all()
+    return [_row_to_chunk(r, score=round(1.0 - float(r.distance), 4)) for r in rows]
+
+
+async def search_similar_chunks(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    query: str,
+    document_ids: Sequence[int] | None = None,
+    top_k: int = RETRIEVAL_TOP_K,
+    min_score: float = RETRIEVAL_MIN_SCORE,
+) -> list[RetrievedChunk]:
+    """Sorguyu embed eder ve kullanıcının belgelerindeki en yakın `top_k` parçayı döner.
+
+    - Yalnızca `completed` durumundaki belgeler aranır.
+    - `document_ids` verilirse arama yalnızca o belgelerle sınırlanır (boş/None = tüm belgeler).
+    - `min_score` altındaki parçalar elenir.
+    """
+    [query_vector] = await embed_texts_async([query])
+    results = await _vector_search(
+        db, query_vector, user_id=user_id, document_ids=document_ids, limit=top_k
+    )
+    kept = [r for r in results if r.score >= min_score]
+    logger.info(
+        "Vektör arama: %d sonuç, %d tanesi eşiği (%.2f) geçti. Skorlar: %s",
+        len(results),
+        len(kept),
+        min_score,
+        [r.score for r in results],
+    )
+    return kept
 
 
 async def hybrid_search_chunks(
@@ -81,132 +192,60 @@ async def hybrid_search_chunks(
     *,
     user_id: int,
     query: str,
-    document_id: int | None = None,
+    document_ids: Sequence[int] | None = None,
     top_k: int = RETRIEVAL_TOP_K,
     min_score: float = RETRIEVAL_MIN_SCORE,
-    rrf_k: int = 60,
 ) -> list[RetrievedChunk]:
-    """Adım 3: Vektör benzerliği (pgvector) ile Türkçe Full-Text Search (tsvector)
-    sonuçlarını Reciprocal Rank Fusion (RRF) ile birleştirir.
+    """Vektör + Türkçe tam metin aramasını RRF ile birleştirerek en iyi `top_k` parçayı döner.
+
+    1. Her iki koldan `max(top_k * 3, HYBRID_CANDIDATES)` aday alınır.
+    2. Adaylar sıralarına göre RRF ile birleştirilir (skor = ağırlık / (k + sıra)).
+    3. Eşikler uygulanır (bkz. `fuse_ranked_chunks`) ve ilk `top_k` döner.
+
+    Anahtar kelime kolu başarısız olursa (örn. `scripts/migrate_v2.py` çalıştırılmamışsa
+    `content_tsv` sütunu yoktur) uyarı günlüğe yazılır ve arama yalnızca vektörle devam eder;
+    SAVEPOINT kullanıldığı için ana transaction bozulmaz.
     """
+    candidates = max(top_k * 3, HYBRID_CANDIDATES)
     [query_vector] = await embed_texts_async([query])
-    vector_literal = "[" + ",".join(f"{x:.8f}" for x in query_vector) + "]"
-    pool_limit = max(top_k * 4, 20)
 
+    vector_hits = await _vector_search(
+        db, query_vector, user_id=user_id, document_ids=document_ids, limit=candidates
+    )
+
+    fts_hits: list[RetrievedChunk] = []
     try:
-        await db.execute(text(f"SET LOCAL hnsw.ef_search = {int(HNSW_EF_SEARCH)}"))
-
-        sql = text(
-            """
-            WITH vector_candidates AS (
-                SELECT
-                    dc.id AS chunk_id,
-                    1.0 - (dc.embedding <=> CAST(:query_vec AS vector)) AS vec_sim,
-                    ROW_NUMBER() OVER (
-                        ORDER BY dc.embedding <=> CAST(:query_vec AS vector)
-                    ) AS vec_rank
-                FROM document_chunks dc
-                JOIN documents d ON d.id = dc.document_id
-                WHERE d.user_id = CAST(:user_id AS INTEGER)
-                  AND d.status = CAST(:completed_status AS VARCHAR)
-                  AND (CAST(:doc_id AS INTEGER) IS NULL OR dc.document_id = CAST(:doc_id AS INTEGER))
-                  AND (1.0 - (dc.embedding <=> CAST(:query_vec AS vector))) >= CAST(:min_score AS FLOAT)
-                ORDER BY dc.embedding <=> CAST(:query_vec AS vector)
-                LIMIT CAST(:pool_limit AS INTEGER)
-            ),
-            fts_candidates AS (
-                SELECT
-                    dc.id AS chunk_id,
-                    ts_rank_cd(dc.content_tsv, websearch_to_tsquery('turkish', CAST(:query_text AS TEXT))) AS fts_rank_score,
-                    ROW_NUMBER() OVER (
-                        ORDER BY ts_rank_cd(dc.content_tsv, websearch_to_tsquery('turkish', CAST(:query_text AS TEXT))) DESC
-                    ) AS fts_rank
-                FROM document_chunks dc
-                JOIN documents d ON d.id = dc.document_id
-                WHERE d.user_id = CAST(:user_id AS INTEGER)
-                  AND d.status = CAST(:completed_status AS VARCHAR)
-                  AND (CAST(:doc_id AS INTEGER) IS NULL OR dc.document_id = CAST(:doc_id AS INTEGER))
-                  AND dc.content_tsv @@ websearch_to_tsquery('turkish', CAST(:query_text AS TEXT))
-                ORDER BY fts_rank_score DESC
-                LIMIT CAST(:pool_limit AS INTEGER)
-            ),
-            rrf_fused AS (
-                SELECT
-                    COALESCE(v.chunk_id, f.chunk_id) AS chunk_id,
-                    COALESCE(1.0 / (CAST(:rrf_k AS FLOAT) + v.vec_rank), 0.0)
-                      + COALESCE(1.0 / (CAST(:rrf_k AS FLOAT) + f.fts_rank), 0.0) AS rrf_score,
-                    v.vec_sim,
-                    f.fts_rank_score
-                FROM vector_candidates v
-                FULL OUTER JOIN fts_candidates f ON v.chunk_id = f.chunk_id
+        async with db.begin_nested():
+            fts_hits = await _fts_search(
+                db,
+                query,
+                query_vector,
+                user_id=user_id,
+                document_ids=document_ids,
+                limit=candidates,
             )
-            SELECT
-                dc.id AS chunk_id,
-                dc.document_id,
-                d.filename,
-                dc.chunk_index,
-                dc.page_number,
-                dc.content,
-                r.rrf_score,
-                r.vec_sim
-            FROM rrf_fused r
-            JOIN document_chunks dc ON dc.id = r.chunk_id
-            JOIN documents d ON d.id = dc.document_id
-            ORDER BY r.rrf_score DESC, COALESCE(r.vec_sim, 0.0) DESC
-            LIMIT CAST(:top_k AS INTEGER)
-            """
+    except DBAPIError:
+        logger.warning(
+            "Anahtar kelime araması başarısız oldu, yalnızca vektör sonuçları kullanılacak. "
+            "scripts/migrate_v2.py çalıştırıldı mı?",
+            exc_info=True,
         )
 
-        rows = (
-            await db.execute(
-                sql,
-                {
-                    "query_vec": vector_literal,
-                    "query_text": query,
-                    "user_id": int(user_id),
-                    "completed_status": DocumentStatus.COMPLETED.value,
-                    "doc_id": int(document_id) if document_id is not None else None,
-                    "min_score": float(min_score),
-                    "pool_limit": int(pool_limit),
-                    "rrf_k": int(rrf_k),
-                    "top_k": int(top_k),
-                },
-            )
-        ).all()
-
-        results = [
-            RetrievedChunk(
-                chunk_id=row.chunk_id,
-                document_id=row.document_id,
-                document_name=row.filename,
-                chunk_index=row.chunk_index,
-                page_number=row.page_number,
-                content=row.content,
-                score=round(
-                    float(row.vec_sim) if row.vec_sim is not None else float(row.rrf_score),
-                    4,
-                ),
-            )
-            for row in rows
-        ]
-
-        logger.info(
-            "Hibrit Arama (RRF): %d sonuç bulundu. RRF skorları: %s",
-            len(results),
-            [round(float(r.rrf_score), 4) for r in rows],
-        )
-        return results
-
-    except Exception:
-        logger.exception(
-            "Hibrit arama sırasında SQL hatası oluştu; standart vektör aramasına (fallback) geçiliyor."
-        )
-        await db.rollback()
-        return await search_similar_chunks(
-            db,
-            user_id=user_id,
-            query=query,
-            document_id=document_id,
-            top_k=top_k,
-            min_score=min_score,
-        )
+    results = fuse_ranked_chunks(
+        vector_hits,
+        fts_hits,
+        top_k=top_k,
+        min_score=min_score,
+        fts_min_score=HYBRID_FTS_MIN_SCORE,
+        k=HYBRID_RRF_K,
+        vector_weight=HYBRID_VECTOR_WEIGHT,
+        fts_weight=HYBRID_FTS_WEIGHT,
+    )
+    logger.info(
+        "Hibrit arama: vektör=%d, anahtar kelime=%d aday -> %d sonuç. (kosinüs, rrf, kaynak): %s",
+        len(vector_hits),
+        len(fts_hits),
+        len(results),
+        [(r.score, r.rrf_score, r.matched_by) for r in results],
+    )
+    return results

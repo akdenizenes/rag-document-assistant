@@ -16,11 +16,12 @@ class DocumentOut(BaseModel):
     page_count: int
     status: str  # pending | processing | completed | failed
     error_message: str | None = None
-    summary: str | None = None
-    doc_metadata: dict[str, Any] | None = None
-    summary_status: str = "pending"
     created_at: datetime
     chunk_count: int = 0
+    # v2: LLM ile üretilen özet ve metaveri (başlık, ana konular, soru/bölüm sayısı, ...)
+    summary: str | None = None
+    summary_status: str = "pending"  # pending | processing | completed | failed | skipped
+    doc_metadata: dict[str, Any] | None = None
 
 
 class DocumentList(BaseModel):

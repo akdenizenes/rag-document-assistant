@@ -1,108 +1,199 @@
-"""Adım 1: Mevcut PDF'ler için Tam Metin, Özet ve Metaveri Geri Doldurma (Backfill) Betiği.
+"""Mevcut belgeler için tam metin, metaveri ve özeti geri doldurur (backfill).
+
+Önce `python scripts/migrate_v2.py` çalıştırılmış olmalı.
 
 Kullanım (proje kökünden):
-    python scripts/backfill_metadata.py
+    python scripts/backfill_metadata.py                 # eksik olan her şeyi doldurur
+    python scripts/backfill_metadata.py --no-summary    # yalnızca tam metin (LLM çağrısı YOK)
+    python scripts/backfill_metadata.py --document-id 7 # tek belge
+    python scripts/backfill_metadata.py --limit 5       # en fazla 5 belge
+    python scripts/backfill_metadata.py --retry-failed  # özeti 'failed' olanları da dene
+    python scripts/backfill_metadata.py --force         # dolu olanları da baştan üret
+    python scripts/backfill_metadata.py --dry-run       # ne yapılacağını göster
 
-Yaptığı işlemler:
-  1. Veritabanındaki `completed` durumundaki tüm belgeleri tarar.
-  2. `uploads/{doc.id}.pdf` dosyasını okuyarak (bulunamazsa mevcut `document_chunks` kayıtlarını birleştirerek) `full_text` sütununu doldurur.
-  3. Özeti veya metaverisi eksik olan belgeler için Gemini (`generate_document_summary`) çağrısı yaparak `summary`, `doc_metadata` ve `summary_status='completed'` alanlarını günceller.
+Ne yapar? `uploads/<belge_id>.pdf` dosyalarını okuyup, veritabanında kaydı olan ve
+`completed` durumundaki belgeler için:
+  1. `full_text` boşsa PDF'ten sayfa işaretli tam metni çıkarıp kaydeder,
+     temel metaveriyi (sayfa/karakter/kelime sayısı) yazar.
+  2. Özeti yoksa LLM ile kısa özet + metaveri (başlık, ana konular, soru/bölüm sayısı) üretir.
+
+Tekrar çalıştırılabilir (idempotent): yalnızca eksik olanları işler. Token kotasını korumak için
+belgeler tek tek ve aralarında bekleyerek işlenir; art arda 3 özet başarısız olursa (kota/anahtar
+sorunu olabilir) betik durur, sorun giderilince aynı komutla devam edilir.
 """
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from sqlalchemy import select
-from app.database import AsyncSessionLocal, close_db
-from app.models import Document, DocumentChunk, DocumentStatus, SummaryStatus
-from app.services.document_service import build_full_text, upload_path
-from app.services.llm_service import generate_document_summary
-from app.services.pdf_service import extract_pages
+from sqlalchemy import select  # noqa: E402
+
+from app.config import FULL_TEXT_MAX_CHARS, SUMMARY_ENABLED, UPLOAD_DIR  # noqa: E402
+from app.database import AsyncSessionLocal, close_db, verify_schema  # noqa: E402
+from app.models import Document, DocumentStatus, SummaryStatus  # noqa: E402
+from app.services.document_service import (  # noqa: E402
+    compute_basic_metadata,
+    generate_document_summary,
+    upload_path,
+)
+from app.services.pdf_service import build_full_text, extract_pages  # noqa: E402
+
+MAX_CONSECUTIVE_SUMMARY_FAILURES = 3
 
 
-async def _extract_or_reconstruct_full_text(session, doc: Document) -> tuple[str, int]:
-    pdf_file = upload_path(doc.id)
-    if pdf_file.exists() and pdf_file.is_file():
-        print(f"  📄 Diskteki PDF okunuyor: {pdf_file}")
-        pages = await asyncio.to_thread(extract_pages, pdf_file)
-        return build_full_text(pages), len(pages)
-
-    print(f"  ⚠️ Diskte {pdf_file.name} bulunamadı; veritabanındaki parçalardan (chunks) birleştiriliyor...")
-    chunks = (
-        await session.execute(
-            select(DocumentChunk)
-            .where(DocumentChunk.document_id == doc.id)
-            .order_by(DocumentChunk.chunk_index.asc())
-        )
-    ).scalars().all()
-    text_joined = "\n\n".join(c.content for c in chunks)
-    return text_joined, doc.page_count or 1
-
-
-async def run_backfill() -> None:
+async def load_candidates(args: argparse.Namespace) -> tuple[list, int, set[int]]:
+    """(işlenecek belgeler, hazır olmadığı için atlanan sayısı, veritabanındaki tüm belge id'leri)."""
     async with AsyncSessionLocal() as session:
-        docs = (
+        rows = (
             await session.execute(
-                select(Document)
-                .where(Document.status == DocumentStatus.COMPLETED.value)
-                .order_by(Document.id.asc())
+                select(
+                    Document.id,
+                    Document.filename,
+                    Document.status,
+                    Document.full_text.is_(None).label("no_text"),
+                    Document.summary.is_(None).label("no_summary"),
+                    Document.summary_status,
+                ).order_by(Document.id)
             )
-        ).scalars().all()
+        ).all()
 
-        print(f"🔍 Toplam {len(docs)} tamamlanmış belge kontrol ediliyor...")
+    selected = []
+    not_ready = 0
+    retry_statuses = {SummaryStatus.PENDING.value, SummaryStatus.PROCESSING.value}
+    if args.retry_failed:
+        retry_statuses.add(SummaryStatus.FAILED.value)
 
-        for doc in docs:
-            needs_full_text = not doc.full_text or not doc.full_text.strip()
-            needs_summary = (
-                not doc.summary
-                or doc.summary_status != SummaryStatus.COMPLETED.value
-            )
+    for row in rows:
+        if args.document_id is not None and row.id != args.document_id:
+            continue
+        if row.status != DocumentStatus.COMPLETED.value:
+            not_ready += 1
+            continue
+        need_text = args.force or row.no_text
+        need_summary = (
+            not args.no_summary
+            and SUMMARY_ENABLED
+            and (args.force or (row.no_summary and row.summary_status in retry_statuses))
+        )
+        if need_text or need_summary:
+            selected.append((row, need_text, need_summary))
 
-            if not needs_full_text and not needs_summary:
-                print(f"⏭️  [ID={doc.id}] {doc.filename}: Tam metin ve özet zaten mevcut, atlanıyor.")
+    if args.limit:
+        selected = selected[: args.limit]
+    return selected, not_ready, {r.id for r in rows}
+
+
+async def backfill_text(document_id: int) -> str | None:
+    """PDF'ten tam metni çıkarıp kaydeder. Hata varsa mesajı, başarıda None döner."""
+    path = upload_path(document_id)
+    if not path.exists():
+        return f"dosya yok ({path})"
+    try:
+        pages = await asyncio.to_thread(extract_pages, path)
+    except ValueError as exc:
+        return str(exc)
+
+    full_text, truncated = build_full_text(pages, FULL_TEXT_MAX_CHARS)
+    if not full_text:
+        return "PDF'ten metin çıkarılamadı (taranmış/görsel olabilir)"
+
+    async with AsyncSessionLocal() as session:
+        doc = await session.get(Document, document_id)
+        if doc is None:
+            return "belge bu sırada silinmiş"
+        existing = doc.doc_metadata or {}
+        doc.full_text = full_text
+        doc.doc_metadata = {**existing, **compute_basic_metadata(len(pages), full_text, truncated)}
+        await session.commit()
+    return None
+
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(description="Mevcut belgeler için tam metin/özet geri doldurma")
+    parser.add_argument("--document-id", type=int, help="yalnızca bu belgeyi işle")
+    parser.add_argument("--limit", type=int, help="en fazla bu kadar belge işle")
+    parser.add_argument("--no-summary", action="store_true", help="LLM özeti üretme, yalnızca tam metin")
+    parser.add_argument("--retry-failed", action="store_true", help="özeti 'failed' olanları da dene")
+    parser.add_argument("--force", action="store_true", help="dolu alanları da yeniden üret")
+    parser.add_argument("--sleep", type=float, default=1.5, help="özetler arası bekleme (sn)")
+    parser.add_argument("--dry-run", action="store_true", help="yalnızca ne yapılacağını göster")
+    args = parser.parse_args()
+
+    try:
+        await verify_schema()
+    except RuntimeError as exc:
+        raise SystemExit(f"Hata: {exc}") from exc
+
+    if not SUMMARY_ENABLED and not args.no_summary:
+        print("Uyarı: SUMMARY_ENABLED=false, özet üretimi atlanacak (yalnızca tam metin).")
+
+    selected, not_ready, known = await load_candidates(args)
+    total = len(known)
+
+    # uploads/ içinde veritabanında karşılığı olmayan PDF'ler (bilgi amaçlı)
+    orphans = sorted(
+        p.name for p in UPLOAD_DIR.glob("*.pdf") if not (p.stem.isdigit() and int(p.stem) in known)
+    )
+
+    print(f"Toplam belge: {total} | işlenecek: {len(selected)} | hazır olmadığı için atlanan: {not_ready}")
+    if orphans:
+        print(f"Bilgi: uploads/ içinde veritabanında kaydı olmayan {len(orphans)} dosya var "
+              f"(atlanır): {', '.join(orphans[:5])}{' ...' if len(orphans) > 5 else ''}")
+    if not selected:
+        print("Yapılacak iş yok.")
+        await close_db()
+        return
+
+    if args.dry_run:
+        for row, need_text, need_summary in selected:
+            todo = [n for n, flag in (("tam metin", need_text), ("özet", need_summary)) if flag]
+            print(f"  [{row.id}] {row.filename}: {' + '.join(todo)}")
+        await close_db()
+        return
+
+    text_ok = summary_ok = failures = 0
+    consecutive_summary_failures = 0
+    aborted = False
+
+    for index, (row, need_text, need_summary) in enumerate(selected, start=1):
+        prefix = f"[{index}/{len(selected)}] #{row.id} {row.filename}"
+
+        if need_text:
+            error = await backfill_text(row.id)
+            if error:
+                failures += 1
+                print(f"{prefix}: tam metin YAZILAMADI -> {error}")
                 continue
+            text_ok += 1
+            print(f"{prefix}: tam metin kaydedildi")
 
-            print(f"⚙️  [ID={doc.id}] {doc.filename} işleniyor...")
-
-            if needs_full_text:
-                full_text, page_count = await _extract_or_reconstruct_full_text(session, doc)
-                doc.full_text = full_text
-                if not doc.page_count:
-                    doc.page_count = page_count
-                await session.commit()
-                print(f"  ✅ full_text kaydedildi ({len(full_text)} karakter).")
-
-            if doc.full_text and needs_summary:
-                try:
-                    doc.summary_status = SummaryStatus.PROCESSING.value
-                    await session.commit()
-
-                    summary, metadata = await generate_document_summary(
-                        full_text=doc.full_text,
-                        filename=doc.filename,
-                        page_count=doc.page_count,
-                    )
-                    doc.summary = summary
-                    doc.doc_metadata = metadata
-                    doc.summary_status = SummaryStatus.COMPLETED.value
-                    await session.commit()
+        if need_summary:
+            if await generate_document_summary(row.id):
+                summary_ok += 1
+                consecutive_summary_failures = 0
+                print(f"{prefix}: özet ve metaveri kaydedildi")
+            else:
+                failures += 1
+                consecutive_summary_failures += 1
+                print(f"{prefix}: özet ÜRETİLEMEDİ (ayrıntı için sunucu günlüklerine bak)")
+                if consecutive_summary_failures >= MAX_CONSECUTIVE_SUMMARY_FAILURES:
                     print(
-                        f"  ✅ Özet ve metaveri üretildi -> Tür: {metadata.get('document_type')}, "
-                        f"Soru Sayısı: {metadata.get('question_count')}, "
-                        f"Bölüm Sayısı: {metadata.get('section_count')}"
+                        f"\nArt arda {MAX_CONSECUTIVE_SUMMARY_FAILURES} özet başarısız oldu "
+                        "(kota ya da LLM_API_KEY sorunu olabilir). Durduruluyor; sorunu giderip "
+                        "aynı komutu `--retry-failed` ile tekrar çalıştır."
                     )
-                except Exception as exc:
-                    await session.rollback()
-                    doc.summary_status = SummaryStatus.FAILED.value
-                    await session.commit()
-                    print(f"  ❌ Özet/metaveri hatası ([ID={doc.id}]): {exc}")
+                    aborted = True
+                    break
+            await asyncio.sleep(args.sleep)
 
+    print(f"\nBitti: tam metin {text_ok}, özet {summary_ok}, hata {failures}.")
     await close_db()
-    print("🎉 Backfill işlemi tamamlandı!")
+    if aborted or failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
-    asyncio.run(run_backfill())
+    asyncio.run(main())

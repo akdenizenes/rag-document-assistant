@@ -1,40 +1,56 @@
 """Ortak FastAPI dependency'leri.
 
-NOT: Gerçek kimlik doğrulama (JWT) sonraki aşamada eklenecek. O zamana kadar
-tüm istekler tek bir "demo" kullanıcı adına çalışır. Route'lar yalnızca
-`get_current_user` dependency'sine bağlı olduğu için, auth eklendiğinde
-sadece bu fonksiyon değişecek.
+Kullanıcı kimlik doğrulaması (JWT Bearer Token) ve veritabanı oturumu.
 """
 
-from fastapi import Depends
+from __future__ import annotations
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models import User
+from app.services.auth_service import decode_access_token
 
-DEMO_EMAIL = "demo@local.dev"
+security = HTTPBearer(auto_error=False)
 
 
-async def get_current_user(db: AsyncSession = Depends(get_db)) -> User:
-    result = await db.execute(select(User).where(User.email == DEMO_EMAIL))
-    user = result.scalar_one_or_none()
-    if user is not None:
-        return user
+async def get_current_user(
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+    db: AsyncSession = Depends(get_db),
+) -> User:
+    """Header'daki Bearer Token üzerinden kullanıcıyı bulur ve doğrular."""
+    if not credentials or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Oturum açmanız gerekiyor (Eksik veya geçersiz Authorization başlığı).",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    user = User(
-        email=DEMO_EMAIL,
-        full_name="Demo Kullanıcı",
-        hashed_password="!placeholder",  # geçerli bir hash değil, giriş yapılamaz
-    )
-    db.add(user)
+    payload = decode_access_token(credentials.credentials)
+    if not payload or "sub" not in payload:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Geçersiz veya süresi dolmuş oturum belirteci.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     try:
-        await db.commit()
-    except IntegrityError:
-        # Eşzamanlı ilk isteklerde başka bir istek kullanıcıyı zaten oluşturmuş olabilir.
-        await db.rollback()
-        result = await db.execute(select(User).where(User.email == DEMO_EMAIL))
-        return result.scalar_one()
-    await db.refresh(user)
+        user_id = int(payload["sub"])
+    except (ValueError, TypeError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Belirteç kullanıcı kimliği geçersiz.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await db.scalar(select(User).where(User.id == user_id))
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Kullanıcı bulunamadı.",
+        )
+
     return user
