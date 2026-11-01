@@ -1,6 +1,8 @@
 """Belge yükleme ve yönetim endpoint'leri."""
 
 import asyncio
+import io
+import zipfile
 from pathlib import Path
 
 from fastapi import (
@@ -16,12 +18,18 @@ from fastapi import (
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import MAX_UPLOAD_BYTES, MAX_UPLOAD_MB
+from app.config import (
+    GENERIC_MIMES,
+    MAX_UPLOAD_MB_BY_EXT,
+    SUPPORTED_EXTENSIONS,
+    SUPPORTED_FORMATS,
+)
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import Document, DocumentChunk, DocumentStatus, User
 from app.rate_limit import limit_default, limit_upload
 from app.schemas.document import DocumentList, DocumentOut
+from app.services.document_parser import decode_text_bytes
 from app.services.document_service import delete_file, process_document, save_file
 
 router = APIRouter(tags=["documents"], dependencies=[Depends(limit_default)])
@@ -33,17 +41,73 @@ def _to_out(doc: Document, chunk_count: int = 0) -> DocumentOut:
     return out
 
 
-async def _read_limited(file: UploadFile) -> bytes:
-    """Dosyayı parça parça okur, boyut sınırını aşarsa 413 döner."""
+_SUPPORTED_LABEL = ", ".join(SUPPORTED_EXTENSIONS)
+
+
+def _max_bytes(extension: str) -> int:
+    return MAX_UPLOAD_MB_BY_EXT[extension] * 1024 * 1024
+
+
+async def _read_limited(file: UploadFile, extension: str) -> bytes:
+    """Dosyayı parça parça okur, biçime özgü boyut sınırını aşarsa 413 döner."""
+    limit = _max_bytes(extension)
     buffer = bytearray()
     while block := await file.read(1024 * 1024):
         buffer.extend(block)
-        if len(buffer) > MAX_UPLOAD_BYTES:
+        if len(buffer) > limit:
             raise HTTPException(
                 status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                f"Dosya çok büyük (en fazla {MAX_UPLOAD_MB} MB).",
+                f"Dosya çok büyük ({extension} için en fazla {MAX_UPLOAD_MB_BY_EXT[extension]} MB).",
             )
     return bytes(buffer)
+
+
+def _validate_extension_and_mime(filename: str, content_type: str | None) -> str:
+    """Uzantıyı ve (varsa) istemcinin bildirdiği MIME türünü doğrular; küçük harfli uzantıyı döner."""
+    extension = Path(filename).suffix.lower()
+    if extension not in SUPPORTED_FORMATS:
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"Desteklenmeyen dosya biçimi. Kabul edilenler: {_SUPPORTED_LABEL}",
+        )
+    # Content-Type istemci tarafından gönderilir, güvenilmezdir: yalnızca açıkça başka bir
+    # biçimi bildiriyorsa (ör. .pdf uzantılı image/png) reddedilir. Asıl doğrulama içeriktedir.
+    mime = (content_type or "").split(";")[0].strip().lower()
+    if mime not in GENERIC_MIMES and mime not in SUPPORTED_FORMATS[extension]["accepted_mimes"]:
+        raise HTTPException(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"Dosya türü ({mime}) {extension} uzantısıyla uyuşmuyor.",
+        )
+    return extension
+
+
+def _validate_content(extension: str, data: bytes) -> None:
+    """Dosya içeriğini (magic bytes) uzantıyla karşılaştırır; uyuşmazlıkta 400 döner."""
+    if extension == ".pdf":
+        if not data.startswith(b"%PDF-"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dosya geçerli bir PDF değil.")
+    elif extension == ".docx":
+        if not data.startswith(b"PK\x03\x04"):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dosya geçerli bir DOCX değil.")
+        try:
+            with zipfile.ZipFile(io.BytesIO(data)) as zf:
+                if "word/document.xml" not in zf.namelist():
+                    raise HTTPException(
+                        status.HTTP_400_BAD_REQUEST,
+                        "Dosya geçerli bir DOCX değil (eski .doc veya başka bir ZIP olabilir).",
+                    )
+        except zipfile.BadZipFile as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "DOCX dosyası bozuk veya geçerli değil."
+            ) from exc
+    elif extension == ".txt":
+        utf16 = data.startswith((b"\xff\xfe", b"\xfe\xff"))
+        if b"\x00" in data and not utf16:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "Dosya düz metin değil (ikili içerik algılandı)."
+            )
+        if not decode_text_bytes(data).strip():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Metin dosyası yalnızca boşluk içeriyor.")
 
 
 async def _get_owned_document(db: AsyncSession, user: User, document_id: int) -> Document:
@@ -63,29 +127,27 @@ async def _get_owned_document(db: AsyncSession, user: User, document_id: int) ->
 )
 async def upload_document(
     background_tasks: BackgroundTasks,
-    file: UploadFile = File(..., description="Yüklenecek PDF dosyası"),
+    file: UploadFile = File(..., description="Yüklenecek belge (.pdf, .docx veya .txt)"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> DocumentOut:
-    """PDF'i kaydeder ve işlemeyi (chunking + embedding) arka planda başlatır.
+    """PDF/DOCX/TXT dosyasını kaydeder ve işlemeyi (chunking + embedding) arka planda başlatır.
 
     Yanıt hemen döner (202). İlerlemeyi `GET /documents/{id}` ile `status` alanından izle:
     pending -> processing -> completed | failed
     """
     filename = Path(file.filename or "").name
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Yalnızca .pdf dosyaları kabul edilir.")
+    extension = _validate_extension_and_mime(filename, file.content_type)
 
-    data = await _read_limited(file)
+    data = await _read_limited(file, extension)
     if not data:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dosya boş.")
-    if not data.startswith(b"%PDF-"):
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Dosya geçerli bir PDF değil.")
+    _validate_content(extension, data)
 
     doc = Document(
         user_id=user.id,
         filename=filename[:255],
-        content_type="application/pdf",
+        content_type=SUPPORTED_FORMATS[extension]["mime"],
         file_size=len(data),
         status=DocumentStatus.PENDING.value,
     )
@@ -94,7 +156,7 @@ async def upload_document(
     await db.refresh(doc)
 
     try:
-        await asyncio.to_thread(save_file, doc.id, data)
+        await asyncio.to_thread(save_file, doc.id, data, extension)
     except OSError as exc:
         await db.execute(delete(Document).where(Document.id == doc.id))
         await db.commit()

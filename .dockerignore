@@ -1,0 +1,23 @@
+.git
+.gitignore
+.gitattributes
+.idea
+.vscode
+.streamlit
+__pycache__
+**/__pycache__
+*.pyc
+.pytest_cache
+venv
+.venv
+# Sırlar imaja girmez (compose env_file ile çalışma zamanında verilir)
+.env
+.env.*
+*.env
+uploads
+tests
+pytest.ini
+*.zip
+*.patch
+*.md
+docker-compose.yml

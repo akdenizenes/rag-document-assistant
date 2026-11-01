@@ -1,0 +1,37 @@
+# syntax=docker/dockerfile:1.7
+# ============================================================================
+# RAG Belge Asistanı - Streamlit arayüzü (hafif imaj: torch / OCR / veritabanı yok)
+# ============================================================================
+ARG PYTHON_VERSION=3.12
+FROM python:${PYTHON_VERSION}-slim
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    # API adresi ortam değişkeninden okunur (docker-compose.yml bunu ezer).
+    API_BASE_URL=http://api:8000 \
+    STREAMLIT_SERVER_PORT=8501 \
+    STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
+    STREAMLIT_SERVER_HEADLESS=true \
+    STREAMLIT_SERVER_MAX_UPLOAD_SIZE=25 \
+    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --create-home --home-dir /home/app app
+
+WORKDIR /app
+
+COPY requirements-frontend.txt .
+RUN tr -d '\r' < requirements-frontend.txt > /tmp/req.txt && pip install -r /tmp/req.txt
+
+COPY --chown=app:app frontend ./frontend
+
+USER app
+EXPOSE 8501
+
+# Streamlit'in kendi sağlık ucu
+HEALTHCHECK --interval=15s --timeout=5s --start-period=20s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8501/_stcore/health', timeout=4)" || exit 1
+
+CMD ["streamlit", "run", "frontend/streamlit_app.py"]

@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.dependencies import get_current_user
 from app.models import User
 from app.schemas.auth import TokenResponse, UserLoginRequest, UserRegisterRequest, UserResponse
 from app.services.auth_service import create_access_token, hash_password, verify_password
@@ -40,6 +41,16 @@ async def register(payload: UserRegisterRequest, db: AsyncSession = Depends(get_
         email=user.email,
         full_name=user.full_name,
     )
+
+
+@router.get("/me", response_model=UserResponse)
+async def me(user: User = Depends(get_current_user)):
+    """Bearer token'ı doğrular ve oturumdaki kullanıcıyı döner.
+
+    Streamlit arayüzü "Beni hatırla" çerezindeki token'ı sayfa yenilenince bununla doğrular:
+    geçerliyse 200, geçersiz/süresi dolmuşsa 401.
+    """
+    return user
 
 
 @router.post("/login", response_model=TokenResponse)

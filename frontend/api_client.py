@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from collections.abc import Iterable, Iterator, Sequence
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,7 +15,15 @@ BACKEND_MESSAGE_LIMIT = 4000  # tek bir geçmiş mesajının en fazla karakter s
 
 
 class ApiError(Exception):
-    """Kullanıcıya gösterilebilir, Türkçe hata mesajı taşır."""
+    """Kullanıcıya gösterilebilir, Türkçe hata mesajı taşır.
+
+    `status_code`: sunucu HTTP hata yanıtı verdiyse onun kodu; bağlantı/zaman aşımı gibi
+    sunucuya hiç ulaşılamayan hatalarda None. (401 ile "sunucu kapalı"yı ayırt etmek için.)
+    """
+
+    def __init__(self, message: str = "", status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 _GENERIC_STATUS_MESSAGES = {
@@ -25,6 +34,17 @@ _GENERIC_STATUS_MESSAGES = {
     503: "Servis şu anda kullanılamıyor (503). Biraz sonra tekrar dene.",
     504: "Sunucu zamanında yanıt vermedi (504). Biraz sonra tekrar dene.",
 }
+
+
+_MIME_BY_EXT = {
+    ".pdf": "application/pdf",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".txt": "text/plain",
+}
+
+
+def _guess_mime(filename: str) -> str:
+    return _MIME_BY_EXT.get(Path(filename).suffix.lower(), "application/octet-stream")
 
 
 def _extract_detail(resp: httpx.Response) -> str:
@@ -225,7 +245,7 @@ class ApiClient:
                 raise self._connection_error(exc) from exc
 
         if resp.status_code >= 400:
-            raise ApiError(_extract_detail(resp))
+            raise ApiError(_extract_detail(resp), status_code=resp.status_code)
         return resp
 
     # --- kimlik doğrulama (auth) ---
@@ -248,6 +268,15 @@ class ApiClient:
         if "access_token" in data:
             self.set_token(data["access_token"])
         return data
+
+    def me(self, token: str | None = None) -> dict[str, Any]:
+        """Token'ın sahibini döner (GET /auth/me). Geçersiz/süresi dolmuşsa ApiError(status_code=401).
+
+        `token` verilirse yalnızca bu istek için kullanılır; paylaşılan istemcinin token'ı
+        değişmez (çerezden geri yükleme sırasında başka oturumları etkilememek için).
+        """
+        headers = {"Authorization": f"Bearer {token}"} if token else None
+        return _json(self._request("GET", "/auth/me", headers=headers, timeout=10.0))
 
     # --- sistem ---
     def health(self) -> bool:
@@ -277,7 +306,7 @@ class ApiClient:
         resp = self._request(
             "POST",
             "/upload",
-            files={"file": (filename, data, "application/pdf")},
+            files={"file": (filename, data, _guess_mime(filename))},
             timeout=self._upload_timeout,
         )
         return _json(resp)
@@ -382,5 +411,5 @@ class ApiClient:
                 detail = _extract_detail(response)
             finally:
                 response.close()
-            raise ApiError(detail)
-        return ChatStream(response)
+            raise ApiError(detail, status_code=response.status_code)
+        return ChatStream(response)

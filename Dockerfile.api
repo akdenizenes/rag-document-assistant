@@ -1,0 +1,89 @@
+# syntax=docker/dockerfile:1.7
+# ============================================================================
+# RAG Belge Asistanı - FastAPI backend (production)
+#   Aşama 1 (builder) : Python bağımlılıklarını bir venv'e kurar
+#   Aşama 2 (runtime) : Tesseract/Poppler + venv + kod; root olmayan kullanıcıyla çalışır
+# ============================================================================
+ARG PYTHON_VERSION=3.12
+
+# ----------------------------- builder --------------------------------------
+FROM python:${PYTHON_VERSION}-slim AS builder
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# sentence-transformers varsayılan olarak ~2.5 GB'lık CUDA'lı torch çeker. Sunucuda GPU yoksa
+# CPU sürümü imajı çok küçültür. GPU kullanacaksan:
+#   docker compose build --build-arg TORCH_INDEX_URL=https://pypi.org/simple api
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+RUN pip install --index-url "${TORCH_INDEX_URL}" torch
+
+# Streamlit yalnızca frontend imajında gerekli; requirements.txt tek kaynak kalsın diye
+# burada filtrelenir (api imajına gereksiz ~100 MB eklemesin).
+COPY requirements.txt /tmp/requirements.txt
+RUN grep -viE '^[[:space:]]*(extra-)?streamlit' /tmp/requirements.txt \
+        | tr -d '\r' > /tmp/requirements-api.txt \
+    && pip install -r /tmp/requirements-api.txt
+
+# ----------------------------- runtime --------------------------------------
+FROM python:${PYTHON_VERSION}-slim AS runtime
+
+# OCR (Tesseract + Türkçe/İngilizce dil paketleri), PDF->görüntü (Poppler), torch için OpenMP.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        tesseract-ocr \
+        tesseract-ocr-tur \
+        tesseract-ocr-eng \
+        poppler-utils \
+        libgomp1 \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV PATH="/opt/venv/bin:$PATH" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONFAULTHANDLER=1 \
+    HF_HOME=/home/app/.cache/huggingface \
+    TOKENIZERS_PARALLELISM=false \
+    UPLOAD_DIR=/app/uploads
+
+RUN groupadd --system --gid 10001 app \
+    && useradd --system --uid 10001 --gid app --create-home --home-dir /home/app app \
+    && mkdir -p /app/uploads "${HF_HOME}" \
+    && chown -R app:app /app /home/app
+
+COPY --from=builder /opt/venv /opt/venv
+WORKDIR /app
+
+# Embedding modelini imaj oluşturulurken indir: ilk açılışta indirme beklemesi ve dış ağ
+# bağımlılığı olmasın. Ağsız/hızlı derleme için: --build-arg PRELOAD_EMBEDDING_MODEL=false
+# (model o zaman ilk çalıştırmada hf_cache volume'una iner).
+ARG PRELOAD_EMBEDDING_MODEL=true
+ARG EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+RUN if [ "${PRELOAD_EMBEDDING_MODEL}" = "true" ]; then \
+        python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('${EMBEDDING_MODEL}')"; \
+    fi \
+    && chown -R app:app /home/app
+
+# Kod en sona: kod değişince yukarıdaki ağır katmanlar yeniden derlenmez.
+COPY --chown=app:app app ./app
+COPY --chown=app:app scripts ./scripts
+COPY --chown=app:app init_db.py ./init_db.py
+COPY --chown=app:app entrypoint.sh /app/entrypoint.sh
+# Windows'ta düzenlenen dosyalarda CRLF satır sonu bash'i bozar; her durumda temizle.
+RUN sed -i 's/\r$//' /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+USER app
+EXPOSE 8000
+
+# /health/ready veritabanını da yoklar; model yüklenirken (start_period) hata sayılmaz.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=120s --retries=5 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4)" || exit 1
+
+# tini: PID 1 olarak sinyalleri iletir ve zombi süreçleri temizler.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
+CMD ["serve"]

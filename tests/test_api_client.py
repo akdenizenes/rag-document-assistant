@@ -154,3 +154,31 @@ def test_session_endpoints():
 def test_iter_sse_ignores_comments():
     lines = [": keep-alive", "event: token", 'data: {"text": "a"}', "", "data: bozuk", ""]
     assert list(iter_sse(lines)) == [("token", {"text": "a"}), ("message", {})]
+
+
+def test_me_uses_given_token_without_touching_client_token():
+    seen = {}
+
+    def handler(request):
+        seen["auth"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"id": 1, "email": "a@b.c", "full_name": "Ada"})
+
+    client = make_client(handler)
+    client.set_token("other-user-token")
+    assert client.me("cookie-token")["email"] == "a@b.c"
+    assert seen["auth"] == "Bearer cookie-token"
+    assert client.token == "other-user-token"  # paylaşılan istemci etkilenmez
+
+
+def test_api_error_carries_status_code_but_not_for_connection_errors():
+    client = make_client(lambda r: httpx.Response(401, json={"detail": "Geçersiz veya süresi dolmuş oturum belirteci."}))
+    with pytest.raises(ApiError) as exc:
+        client.me("bad")
+    assert exc.value.status_code == 401
+
+    def refuse(request):
+        raise httpx.ConnectError("refused")
+
+    with pytest.raises(ApiError) as exc2:
+        make_client(refuse).me("t")
+    assert exc2.value.status_code is None  # sunucuya ulaşılamadı: çerez silinmemeli

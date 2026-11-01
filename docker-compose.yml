@@ -1,35 +1,114 @@
+# RAG Belge Asistanı - production orkestrasyonu
+#
+#   1) .env.docker içindeki CHANGE_ME değerlerini doldur (en azından parolalar + LLM anahtarı)
+#   2) docker compose up --build -d
+#   3) Arayüz: http://localhost:8501        (API Swagger: http://127.0.0.1:8000/docs)
+#
+# Port/imaj gibi compose-düzeyi değişkenleri .env.docker'dan almak istersen:
+#   docker compose --env-file .env.docker up --build -d
+# Opsiyonel yerel LLM (Ollama) için: docker compose --profile llm up --build -d
+
 services:
+  # ------------------------------------------------------------------ PostgreSQL + pgvector
   db:
-    image: ankane/pgvector:latest
+    image: pgvector/pgvector:pg16
     container_name: rag_postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+    env_file: .env.docker            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
+    shm_size: 256mb
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      # $$ -> değişken compose'ta değil, konteyner içinde çözülür
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 12
+      start_period: 10s
+    networks: [rag_net]
+    # Veritabanı varsayılan olarak DIŞARIYA AÇILMAZ (yalnızca rag_net içinden erişilir).
+    # Yerelde bir SQL istemcisiyle bağlanmak istersen aşağıyı aç:
+    # ports:
+    #   - "127.0.0.1:5432:5432"
 
-  # Opsiyonel yerel LLM. Başlatmak için: docker compose --profile llm up -d
-  # (Ollama'yı doğrudan bilgisayarına kurduysan buna gerek yok.)
+  # ------------------------------------------------------------------ FastAPI backend
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+      args:
+        EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+    image: rag-assistant-api:latest
+    container_name: rag_api
+    restart: unless-stopped
+    env_file: .env.docker
+    environment:
+      # Konteynerler arası sabitler: .env.docker'daki yanlış bir değer bağlantıyı bozamasın.
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      UPLOAD_DIR: /app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - uploads_data:/app/uploads
+      - hf_cache:/home/app/.cache/huggingface
+    ports:
+      # Yalnızca makinenin kendisinden (127.0.0.1). Dışarıya açmak için "8000:8000" yap.
+      - "127.0.0.1:${API_PORT:-8000}:8000"
+    extra_hosts:
+      # LLM_BASE_URL=http://host.docker.internal:11434 ile ana makinedeki Ollama'ya erişim (Linux dahil)
+      - "host.docker.internal:host-gateway"
+    stop_grace_period: 40s
+    networks: [rag_net]
+
+  # ------------------------------------------------------------------ Streamlit arayüzü
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: rag-assistant-frontend:latest
+    container_name: rag_frontend
+    restart: unless-stopped
+    # Arayüz internete açık olan bileşendir: API sırlarını (JWT, LLM anahtarı) görmesin diye
+    # .env.docker'ın tamamı DEĞİL, yalnızca gerekenler verilir.
+    environment:
+      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
+      MAX_UPLOAD_MB_DOCX: ${MAX_UPLOAD_MB_DOCX:-20}
+      MAX_UPLOAD_MB_TXT: ${MAX_UPLOAD_MB_TXT:-5}
+      MAX_SCOPE_DOCUMENTS: ${MAX_SCOPE_DOCUMENTS:-20}
+      DEFAULT_TOP_K: ${DEFAULT_TOP_K:-5}
+      STATUS_POLL_SECONDS: ${STATUS_POLL_SECONDS:-3}
+      API_TIMEOUT_SECONDS: ${API_TIMEOUT_SECONDS:-30}
+      CHAT_TIMEOUT_SECONDS: ${CHAT_TIMEOUT_SECONDS:-200}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8501}:8501"
+    networks: [rag_net]
+
+  # ------------------------------------------------------------------ Opsiyonel: yerel LLM
+  # docker compose --profile llm up -d ; sonra: docker compose exec ollama ollama pull qwen2.5:7b
+  # .env.docker: LLM_PROVIDER=ollama  LLM_BASE_URL=http://ollama:11434
   ollama:
     image: ollama/ollama:latest
     container_name: rag_ollama
     profiles: ["llm"]
     restart: unless-stopped
-    ports:
-      - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    networks: [rag_net]
+
+networks:
+  rag_net:
+    name: rag_net
+    driver: bridge
 
 volumes:
   pgdata:
+  uploads_data:
+  hf_cache:
   ollama_data:

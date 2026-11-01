@@ -1,4 +1,4 @@
-"""Belge işleme hattı: PDF -> metin -> chunk -> embedding -> veritabanı.
+"""Belge işleme hattı: PDF/DOCX/TXT -> metin -> chunk -> embedding -> veritabanı.
 
 v2: tam metin (`documents.full_text`) saklanır; belge hazır olduktan SONRA arka planda LLM ile
 kısa özet ve metaveri (`documents.summary`, `documents.doc_metadata`) üretilir. Özet üretimi
@@ -19,6 +19,7 @@ from app.config import (
     FULL_TEXT_MAX_CHARS,
     LLM_MODEL,
     SUMMARY_ENABLED,
+    SUPPORTED_EXTENSIONS,
     UPLOAD_DIR,
 )
 from app.database import AsyncSessionLocal
@@ -26,7 +27,8 @@ from app.models import Document, DocumentChunk, DocumentStatus, SummaryStatus
 from app.services.chunking import build_chunks
 from app.services.embedding_service import embed_texts_async
 from app.services.llm_service import LLMError, generate
-from app.services.pdf_service import build_full_text, extract_pages
+from app.services.document_parser import parse_document
+from app.services.pdf_service import build_full_text
 from app.services.prompts import build_summary_messages, parse_summary_response
 
 logger = logging.getLogger(__name__)
@@ -37,34 +39,81 @@ _SUMMARY_MAX_ATTEMPTS = 2  # yalnızca 429 (kota) için yeniden denenir
 _SUMMARY_RETRY_DELAY_SECONDS = 20.0
 
 # Özet üretiminde korunan, LLM'den bağımsız (programatik) metaveri anahtarları.
-_BASIC_META_KEYS = ("page_count", "char_count", "word_count", "text_truncated")
+_BASIC_META_KEYS = (
+    "page_count",
+    "char_count",
+    "word_count",
+    "text_truncated",
+    "file_format",
+    "ocr_page_count",
+    "ocr_pages",
+)
 
 
-def upload_path(document_id: int) -> Path:
-    """Diskteki dosya adı belge id'sine bağlıdır; kullanıcı girdisi dosya yoluna karışmaz."""
-    return UPLOAD_DIR / f"{document_id}.pdf"
+def upload_path(document_id: int, extension: str = ".pdf") -> Path:
+    """Diskteki dosya adı belge id'sine bağlıdır; kullanıcı girdisi dosya yoluna karışmaz.
+
+    Uzantı yalnızca izin verilen listeden gelir (routers/documents.py doğrular).
+    """
+    return UPLOAD_DIR / f"{document_id}{extension.lower()}"
 
 
-def save_file(document_id: int, data: bytes) -> None:
-    upload_path(document_id).write_bytes(data)
+def find_upload(document_id: int) -> Path | None:
+    """Belgenin diskteki dosyasını (hangi uzantıda olursa olsun) bulur."""
+    for extension in SUPPORTED_EXTENSIONS:
+        path = upload_path(document_id, extension)
+        if path.exists():
+            return path
+    return None
+
+
+def save_file(document_id: int, data: bytes, extension: str = ".pdf") -> None:
+    upload_path(document_id, extension).write_bytes(data)
 
 
 def delete_file(document_id: int) -> None:
-    upload_path(document_id).unlink(missing_ok=True)
+    for extension in SUPPORTED_EXTENSIONS:
+        upload_path(document_id, extension).unlink(missing_ok=True)
 
 
-def compute_basic_metadata(page_count: int, full_text: str, truncated: bool) -> dict[str, Any]:
-    """LLM gerektirmeyen, güvenilir metaveri: sayfa/karakter/kelime sayısı."""
-    return {
+def compute_basic_metadata(
+    page_count: int,
+    full_text: str,
+    truncated: bool,
+    *,
+    file_format: str | None = None,
+    ocr_pages: list[int] | None = None,
+) -> dict[str, Any]:
+    """LLM gerektirmeyen, güvenilir metaveri: sayfa/karakter/kelime sayısı, biçim, OCR bilgisi."""
+    meta: dict[str, Any] = {
         "page_count": page_count,
         "char_count": len(full_text),
         "word_count": len(full_text.split()),
         "text_truncated": truncated,
     }
+    if file_format:
+        meta["file_format"] = file_format
+    if ocr_pages:
+        meta["ocr_page_count"] = len(ocr_pages)
+        meta["ocr_pages"] = ocr_pages[:200]
+    return meta
+
+
+def _empty_text_message(parsed) -> str:
+    """Hiç metin çıkmadığında biçime özgü, kullanıcıya yol gösteren hata mesajı."""
+    if parsed.file_format == "pdf":
+        detail = " ".join(parsed.warnings)
+        base = "PDF'den metin çıkarılamadı (taranmış/görsel bir PDF olabilir)."
+        if parsed.warnings:
+            return f"{base} {detail}"
+        return f"{base} OCR uygulandı ancak okunabilir metin bulunamadı."
+    if parsed.file_format == "docx":
+        return "DOCX dosyasında metin bulunamadı (yalnızca görsel içeriyor olabilir)."
+    return "Metin dosyası boş veya yalnızca boşluk karakterlerinden oluşuyor."
 
 
 async def process_document(document_id: int) -> None:
-    """Yüklenmiş bir PDF'i işler. Arka plan görevi olarak çalışır, kendi DB oturumunu açar.
+    """Yüklenmiş bir belgeyi (PDF/DOCX/TXT) işler. Arka plan görevi olarak çalışır, kendi DB oturumunu açar.
 
     Sıra: metin çıkar -> chunk + embedding + tam metin kaydet (belge `completed`) -> özet üret.
     """
@@ -78,12 +127,17 @@ async def process_document(document_id: int) -> None:
             doc.status = DocumentStatus.PROCESSING.value
             await session.commit()
 
-            pages = await asyncio.to_thread(extract_pages, upload_path(document_id))
+            file_path = find_upload(document_id)
+            if file_path is None:
+                raise ValueError("Yüklenen dosya diskte bulunamadı. Lütfen tekrar yükleyin.")
+
+            parsed = await asyncio.to_thread(parse_document, file_path)
+            pages = parsed.pages
+            for warning in parsed.warnings:
+                logger.warning("Belge %d: %s", document_id, warning)
             chunks = build_chunks(pages)
             if not chunks:
-                raise ValueError(
-                    "PDF'den metin çıkarılamadı (taranmış/görsel bir PDF olabilir)."
-                )
+                raise ValueError(_empty_text_message(parsed))
 
             full_text, truncated = build_full_text(pages, FULL_TEXT_MAX_CHARS)
             if truncated:
@@ -105,7 +159,13 @@ async def process_document(document_id: int) -> None:
             )
             doc.page_count = len(pages)
             doc.full_text = full_text
-            doc.doc_metadata = compute_basic_metadata(len(pages), full_text, truncated)
+            doc.doc_metadata = compute_basic_metadata(
+                len(pages),
+                full_text,
+                truncated,
+                file_format=parsed.file_format,
+                ocr_pages=parsed.ocr_pages,
+            )
             doc.summary = None
             doc.summary_status = (
                 SummaryStatus.PENDING.value if SUMMARY_ENABLED else SummaryStatus.SKIPPED.value
@@ -115,8 +175,10 @@ async def process_document(document_id: int) -> None:
             await session.commit()
             completed = True
             logger.info(
-                "Belge %d işlendi: %d sayfa, %d parça, %d karakter metin.",
+                "Belge %d işlendi (%s%s): %d sayfa/bölüm, %d parça, %d karakter metin.",
                 document_id,
+                parsed.file_format,
+                f", {len(parsed.ocr_pages)} sayfa OCR" if parsed.ocr_pages else "",
                 len(pages),
                 len(chunks),
                 len(full_text),

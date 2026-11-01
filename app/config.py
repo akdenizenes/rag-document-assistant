@@ -26,8 +26,60 @@ if CHUNK_OVERLAP >= CHUNK_SIZE // 2:
     raise ValueError("CHUNK_OVERLAP, CHUNK_SIZE'ın yarısından küçük olmalı.")
 
 # --- Yükleme ---
-MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "20"))
+MAX_UPLOAD_MB: int = int(os.getenv("MAX_UPLOAD_MB", "20"))  # PDF ve DOCX için varsayılan sınır
 MAX_UPLOAD_BYTES: int = MAX_UPLOAD_MB * 1024 * 1024
+
+# Desteklenen biçimler: uzantı -> (kısa ad, kabul edilen MIME türleri, kayıtlı standart MIME).
+# İstemcinin gönderdiği Content-Type güvenilmez olduğundan boş / application/octet-stream de
+# kabul edilir; asıl doğrulama dosya içeriğinde (magic bytes) yapılır (routers/documents.py).
+SUPPORTED_FORMATS: dict[str, dict] = {
+    ".pdf": {
+        "label": "PDF",
+        "mime": "application/pdf",
+        "accepted_mimes": {"application/pdf", "application/x-pdf"},
+    },
+    ".docx": {
+        "label": "DOCX",
+        "mime": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "accepted_mimes": {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/zip",
+            "application/x-zip-compressed",
+        },
+    },
+    ".txt": {
+        "label": "TXT",
+        "mime": "text/plain",
+        "accepted_mimes": {"text/plain", "text/x-log", "application/txt"},
+    },
+}
+SUPPORTED_EXTENSIONS: tuple[str, ...] = tuple(SUPPORTED_FORMATS)
+# Sınıra takılmayan genel MIME türleri (tarayıcı/istemciye göre değişir).
+GENERIC_MIMES: frozenset[str] = frozenset({"", "application/octet-stream", "binary/octet-stream"})
+
+# Biçim başına yükleme sınırı (MB). Düz metin için çok daha düşük sınır yeterlidir.
+MAX_UPLOAD_MB_BY_EXT: dict[str, int] = {
+    ".pdf": MAX_UPLOAD_MB,
+    ".docx": int(os.getenv("MAX_UPLOAD_MB_DOCX", str(MAX_UPLOAD_MB))),
+    ".txt": int(os.getenv("MAX_UPLOAD_MB_TXT", "5")),
+}
+# DOCX bir ZIP'tir; "zip bomb" saldırısına karşı açılmış toplam boyut sınırı.
+MAX_DOCX_UNCOMPRESSED_MB: int = int(os.getenv("MAX_DOCX_UNCOMPRESSED_MB", "100"))
+
+# DOCX/TXT'de sayfa kavramı yoktur; metin yaklaşık bu uzunlukta "bölümlere" ayrılır ve kaynak
+# gösteriminde sayfa yerine bölüm numarası kullanılır.
+VIRTUAL_PAGE_CHARS: int = int(os.getenv("VIRTUAL_PAGE_CHARS", "3000"))
+
+# --- OCR (taranmış PDF'ler için; Tesseract + Poppler sistem paketleri gerekir) ---
+OCR_ENABLED: bool = os.getenv("OCR_ENABLED", "true").lower() == "true"
+# Tesseract dil kodları ("+" ile birleştirilir). Eksik dil paketi varsa otomatik elenir.
+OCR_LANGUAGES: str = os.getenv("OCR_LANGUAGES", "tur+eng")
+OCR_DPI: int = int(os.getenv("OCR_DPI", "200"))
+# Bir sayfanın metin katmanı (boşluksuz) bu kadar karakterden azsa o sayfa OCR'lanır.
+OCR_MIN_CHARS_PER_PAGE: int = int(os.getenv("OCR_MIN_CHARS_PER_PAGE", "25"))
+# Tek belgede OCR'lanacak en fazla sayfa (CPU/süre koruması). Aşan sayfalar boş bırakılır.
+OCR_MAX_PAGES: int = int(os.getenv("OCR_MAX_PAGES", "100"))
+OCR_PAGE_TIMEOUT_SECONDS: int = int(os.getenv("OCR_PAGE_TIMEOUT_SECONDS", "90"))
 
 _upload_dir = Path(os.getenv("UPLOAD_DIR", "uploads"))
 UPLOAD_DIR: Path = _upload_dir if _upload_dir.is_absolute() else BASE_DIR / _upload_dir
@@ -138,4 +190,4 @@ JWT_SECRET_KEY: str = os.getenv(
 JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
 ACCESS_TOKEN_EXPIRE_MINUTES: int = int(
     os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 7))  # Varsayılan: 7 gün
-)
+)

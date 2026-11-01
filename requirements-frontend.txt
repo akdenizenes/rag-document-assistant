@@ -1,0 +1,5 @@
+# Yalnızca Streamlit arayüzü için (Dockerfile.frontend). API bağımlılıkları requirements.txt'te.
+streamlit>=1.40                                  # st.context.cookies için >=1.37 gerekir
+httpx>=0.27
+python-dotenv>=1.0
+extra-streamlit-components>=0.1.71,<0.2          # çerez yazma/silme ("Beni hatırla")

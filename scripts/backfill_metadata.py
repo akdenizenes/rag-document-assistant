@@ -11,7 +11,7 @@ Kullanım (proje kökünden):
     python scripts/backfill_metadata.py --force         # dolu olanları da baştan üret
     python scripts/backfill_metadata.py --dry-run       # ne yapılacağını göster
 
-Ne yapar? `uploads/<belge_id>.pdf` dosyalarını okuyup, veritabanında kaydı olan ve
+Ne yapar? `uploads/<belge_id>.(pdf|docx|txt)` dosyalarını okuyup, veritabanında kaydı olan ve
 `completed` durumundaki belgeler için:
   1. `full_text` boşsa PDF'ten sayfa işaretli tam metni çıkarıp kaydeder,
      temel metaveriyi (sayfa/karakter/kelime sayısı) yazar.
@@ -36,10 +36,11 @@ from app.database import AsyncSessionLocal, close_db, verify_schema  # noqa: E40
 from app.models import Document, DocumentStatus, SummaryStatus  # noqa: E402
 from app.services.document_service import (  # noqa: E402
     compute_basic_metadata,
+    find_upload,
     generate_document_summary,
-    upload_path,
 )
-from app.services.pdf_service import build_full_text, extract_pages  # noqa: E402
+from app.services.document_parser import parse_document  # noqa: E402
+from app.services.pdf_service import build_full_text  # noqa: E402
 
 MAX_CONSECUTIVE_SUMMARY_FAILURES = 3
 
@@ -88,17 +89,18 @@ async def load_candidates(args: argparse.Namespace) -> tuple[list, int, set[int]
 
 async def backfill_text(document_id: int) -> str | None:
     """PDF'ten tam metni çıkarıp kaydeder. Hata varsa mesajı, başarıda None döner."""
-    path = upload_path(document_id)
-    if not path.exists():
-        return f"dosya yok ({path})"
+    path = find_upload(document_id)
+    if path is None:
+        return f"dosya yok (uploads/{document_id}.*)"
     try:
-        pages = await asyncio.to_thread(extract_pages, path)
+        parsed = await asyncio.to_thread(parse_document, path)
     except ValueError as exc:
         return str(exc)
+    pages = parsed.pages
 
     full_text, truncated = build_full_text(pages, FULL_TEXT_MAX_CHARS)
     if not full_text:
-        return "PDF'ten metin çıkarılamadı (taranmış/görsel olabilir)"
+        return "belgeden metin çıkarılamadı (taranmış/görsel olabilir)"
 
     async with AsyncSessionLocal() as session:
         doc = await session.get(Document, document_id)
@@ -106,7 +108,10 @@ async def backfill_text(document_id: int) -> str | None:
             return "belge bu sırada silinmiş"
         existing = doc.doc_metadata or {}
         doc.full_text = full_text
-        doc.doc_metadata = {**existing, **compute_basic_metadata(len(pages), full_text, truncated)}
+        doc.doc_metadata = {**existing, **compute_basic_metadata(
+            len(pages), full_text, truncated,
+            file_format=parsed.file_format, ocr_pages=parsed.ocr_pages,
+        )}
         await session.commit()
     return None
 
@@ -135,7 +140,7 @@ async def main() -> None:
 
     # uploads/ içinde veritabanında karşılığı olmayan PDF'ler (bilgi amaçlı)
     orphans = sorted(
-        p.name for p in UPLOAD_DIR.glob("*.pdf") if not (p.stem.isdigit() and int(p.stem) in known)
+        p.name for p in UPLOAD_DIR.glob("*.*") if not (p.stem.isdigit() and int(p.stem) in known)
     )
 
     print(f"Toplam belge: {total} | işlenecek: {len(selected)} | hazır olmadığı için atlanan: {not_ready}")

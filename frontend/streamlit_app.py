@@ -12,16 +12,21 @@ anlaşılır bir mesaj gösterilir, geri kalan arayüz çalışmaya devam eder.
 
 from __future__ import annotations
 
+import base64
+import time
 import functools
+import inspect
 import itertools
+import json
 import logging
 import os
 import sys
 import traceback
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import extra_streamlit_components as stx
 import streamlit as st
 from dotenv import load_dotenv
 
@@ -38,7 +43,31 @@ CHAT_TIMEOUT = float(os.getenv("CHAT_TIMEOUT_SECONDS", "200"))
 POLL_SECONDS = float(os.getenv("STATUS_POLL_SECONDS", "3"))
 DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", "5"))
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "20"))
+# Biçim başına yükleme sınırı (MB); backend'deki MAX_UPLOAD_MB_* ile aynı olmalı.
+MAX_UPLOAD_MB_BY_EXT = {
+    "pdf": MAX_UPLOAD_MB,
+    "docx": int(os.getenv("MAX_UPLOAD_MB_DOCX", str(MAX_UPLOAD_MB))),
+    "txt": int(os.getenv("MAX_UPLOAD_MB_TXT", "5")),
+}
+SUPPORTED_TYPES = ["pdf", "docx", "txt"]
+
+# "Beni hatırla": JWT, tarayıcı çerezinde saklanır ve sayfa yenilenince (F5) oturum geri yüklenir.
+AUTH_COOKIE_NAME = os.getenv("AUTH_COOKIE_NAME", "rag_auth_token")
+AUTH_COOKIE_DAYS = int(os.getenv("AUTH_COOKIE_DAYS", "7"))  # üst sınır; JWT'nin kendi süresiyle kısıtlanır
+# Belge türüne göre ikon, kısa etiket ve "sayfa" yerine kullanılacak birim adı.
+# DOCX/TXT'de gerçek sayfa yoktur; backend metni "bölümlere" ayırır.
+FILE_TYPES = {
+    "pdf": {"icon": "📕", "label": "PDF", "unit": "sayfa"},
+    "docx": {"icon": "📘", "label": "DOCX", "unit": "bölüm"},
+    "txt": {"icon": "📝", "label": "TXT", "unit": "bölüm"},
+}
 MAX_SCOPE_DOCUMENTS = int(os.getenv("MAX_SCOPE_DOCUMENTS", "20"))
+
+def file_type(filename: str | None) -> dict:
+    """Dosya adının uzantısından ikon/etiket/birim bilgisini döndürür."""
+    ext = Path(filename or "").suffix.lower().lstrip(".")
+    return FILE_TYPES.get(ext, {"icon": "📄", "label": ext.upper() or "?", "unit": "sayfa"})
+
 
 STATUS_LABELS = {
     "pending": "⏳ Sırada",
@@ -77,6 +106,8 @@ def guarded(label: str) -> Callable:
             try:
                 return fn(*args, **kwargs)
             except ApiError as exc:
+                if exc.status_code == 401 and st.session_state.get("token"):
+                    session_expired()
                 st.error(f"{label}: {exc}")
             except Exception:
                 logger.exception("%s sırasında beklenmeyen hata", label)
@@ -125,6 +156,9 @@ def init_state() -> None:
     state.setdefault("flash", [])  # rerun sonrası gösterilecek mesajlar
     state.setdefault("_polling", False)
     state.setdefault("_has_pending", False)
+    state.setdefault("_cookie_checked", False)  # çerezden oturum geri yükleme bu oturumda denendi mi
+    state.setdefault("_cookie_action", None)  # bekleyen çerez işlemi: {"op": "set"|"delete", ...}
+    state.setdefault("_cookie_seq", 0)  # her çerez işlemine benzersiz bileşen anahtarı için
 
 
 def flash(kind: str, message: str) -> None:
@@ -138,8 +172,152 @@ def show_flash() -> None:
     st.session_state.flash = []
 
 
+# --------------------------------------------------------------------------- #
+# Kalıcı oturum ("Beni hatırla"): çerez yönetimi
+# --------------------------------------------------------------------------- #
+# Okuma : st.context.cookies (Streamlit >= 1.37) — sayfa ilk çalıştığında HEMEN hazırdır;
+#         extra-streamlit-components'ın ilk çalıştırmada boş dönme sorunu yaşanmaz.
+# Yazma/silme: extra-streamlit-components CookieManager (tarayıcıda JS ile çerez yazar).
+#         Bileşen yalnızca bekleyen bir işlem varken, o çalıştırmanın SONUNDA çizilir; böylece
+#         st.rerun() bileşeni yarıda kesmez ve arayüzde boş bir öğe kalmaz.
+def jwt_expiry(token: str) -> datetime | None:
+    """JWT'nin `exp` değerini (imza doğrulamadan) okur. Çözülemezse None."""
+    try:
+        payload = token.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        return datetime.fromtimestamp(json.loads(base64.urlsafe_b64decode(payload))["exp"], tz=timezone.utc)
+    except (IndexError, KeyError, TypeError, ValueError):
+        return None
+
+
+def queue_cookie_set(token: str) -> None:
+    """Token'ı çereze yazmayı sıraya alır; süre = min(AUTH_COOKIE_DAYS, JWT süresi)."""
+    expires = datetime.now(timezone.utc) + timedelta(days=AUTH_COOKIE_DAYS)
+    token_exp = jwt_expiry(token)
+    if token_exp is not None:
+        expires = min(expires, token_exp)
+    # Saat dilimli (aware) tarih: sunucu UTC, tarayıcı yerel saatte olsa bile doğru yorumlanır.
+    st.session_state["_cookie_action"] = {"op": "set", "value": token, "expires_at": expires}
+
+
+def queue_cookie_delete() -> None:
+    st.session_state["_cookie_action"] = {"op": "delete"}
+
+
+def _supported_kwargs(fn: Callable, kwargs: dict) -> dict:
+    """Kütüphanenin sürümünde bulunmayan parametreleri atar (sürümler arası imza farkına karşı)."""
+    try:
+        accepted = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in accepted}
+
+
+def apply_cookie_action() -> None:
+    """Bekleyen çerez işlemini tarayıcıda uygular. main() sonunda çağrılır."""
+    state = st.session_state
+    action = state.get("_cookie_action")
+    if not action:
+        return
+    state["_cookie_action"] = None
+    state["_cookie_seq"] = state.get("_cookie_seq", 0) + 1
+    seq = state["_cookie_seq"]
+    try:
+        manager = stx.CookieManager(key=f"cookie_manager_{seq}")
+        if action["op"] == "set":
+            kwargs = {"expires_at": action.get("expires_at"), "key": f"cookie_set_{seq}"}
+            kwargs = _supported_kwargs(manager.set, kwargs)
+            manager.set(AUTH_COOKIE_NAME, action["value"], **kwargs)
+            # Tarayıcının çerezi diske yazması için 0.5 sn bekle
+            time.sleep(0.5)
+        else:
+            kwargs = _supported_kwargs(manager.delete, {"key": f"cookie_delete_{seq}"})
+            try:
+                manager.delete(AUTH_COOKIE_NAME, **kwargs)
+            except KeyError:
+                pass
+            time.sleep(0.3)
+    except Exception:
+        logger.exception("Çerez işlemi başarısız (%s)", action.get("op"))
+
+def read_auth_cookie() -> str | None:
+    try:
+        return st.context.cookies.get(AUTH_COOKIE_NAME) or None
+    except Exception:  # eski Streamlit sürümü veya bağlam yok
+        logger.warning("st.context.cookies okunamadı (Streamlit >= 1.37 gerekir).")
+        return None
+
+
+def restore_session_from_cookie() -> None:
+    """Sayfa yenilenince çerezdeki token geçerliyse oturumu otomatik açar.
+
+    - Çerez yok            -> hiçbir şey yapmaz (giriş ekranı).
+    - Token süresi dolmuş  -> çerezi siler.
+    - API 401/403 derse    -> token geçersiz: çerezi siler, giriş ekranında kalır.
+    - API'ye ulaşılamazsa  -> çerezi KORUR (geçici kesinti oturumu silmesin), sonra tekrar dener.
+    """
+    state = st.session_state
+    if state.get("token") or state.get("_cookie_checked"):
+        return
+    token = read_auth_cookie()
+    if not token:
+        state["_cookie_checked"] = True
+        return
+
+    expiry = jwt_expiry(token)
+    if expiry is not None and expiry <= datetime.now(timezone.utc):
+        state["_cookie_checked"] = True
+        queue_cookie_delete()
+        flash("warning", "Oturum süreniz doldu, lütfen tekrar giriş yapın.")
+        return
+
+    try:
+        user = _get_api_client().me(token)
+    except ApiError as exc:
+        if exc.status_code is None or exc.status_code >= 500:
+            return  # geçici sorun: _cookie_checked False kalır, bir sonraki çalıştırmada yeniden denenir
+        state["_cookie_checked"] = True
+        queue_cookie_delete()  # 401/403/404: token artık geçerli değil
+        flash("warning", "Oturum süreniz doldu, lütfen tekrar giriş yapın.")
+        return
+
+    state["_cookie_checked"] = True
+    state["token"] = token
+    state["user_email"] = user.get("email")
+    state["user_name"] = user.get("full_name")
+
+
+def session_expired() -> None:
+    """Çalışırken token'ın geçersiz çıkması (401): oturumu ve çerezi temizleyip giriş ekranına döner."""
+    state = st.session_state
+    queue_cookie_delete()
+    for key in ["token", "user_email", "user_name", "session_id", "sessions"]:
+        state[key] = None
+    state["messages"], state["docs"], state["scope_ids"] = [], [], []
+    flash("warning", "Oturum süreniz doldu, lütfen tekrar giriş yapın.")
+    st.rerun()
+
+
+def start_session(data: dict, remember: bool) -> None:
+    """Başarılı giriş/kayıt sonrası oturumu kurar; `remember` ise token'ı çereze yazdırır."""
+    state = st.session_state
+    state["token"] = data["access_token"]
+    state["user_email"] = data["email"]
+    state["user_name"] = data.get("full_name")
+    state["_cookie_checked"] = True
+    if remember:
+        queue_cookie_set(data["access_token"])
+    else:
+        queue_cookie_delete()
+
+# st.rerun()   <--- EĞER BURADA st.rerun() VARSA BAŞINA # KOY!
+
 def logout() -> None:
     """Oturumu sonlandırır ve tüm state'i temizler."""
+    # Çerezi sil (asıl silme, bir sonraki çalıştırmada apply_cookie_action ile yapılır).
+    # `_cookie_checked` bilerek True bırakılır: st.context.cookies bu oturum boyunca eski çerezi
+    # göstermeye devam eder; True kalmazsa çıkıştan hemen sonra yeniden otomatik giriş yapılırdı.
+    queue_cookie_delete()
     token_keys = ["token", "user_email", "user_name", "session_id", "messages", "sessions", "docs", "scope_ids"]
     for key in token_keys:
         st.session_state[key] = None
@@ -227,6 +405,9 @@ def render_auth_screen() -> None:
             with st.form("login_form"):
                 email = st.text_input("E-posta", placeholder="ornek@domain.com")
                 password = st.text_input("Parola", type="password")
+                remember = st.checkbox(
+                    "Beni hatırla", value=True, help=f"Bu tarayıcıda {AUTH_COOKIE_DAYS} güne kadar oturumu açık tutar."
+                )
                 submit = st.form_submit_button("Giriş Yap", use_container_width=True, type="primary")
 
                 if submit:
@@ -235,9 +416,7 @@ def render_auth_screen() -> None:
                     else:
                         try:
                             data = get_api().login(email=email.strip(), password=password)
-                            st.session_state["token"] = data["access_token"]
-                            st.session_state["user_email"] = data["email"]
-                            st.session_state["user_name"] = data.get("full_name")
+                            start_session(data, remember)
                             flash("success", f"Hoş geldiniz, {data.get('full_name') or data['email']}!")
                             st.rerun()
                         except ApiError as exc:
@@ -262,9 +441,7 @@ def render_auth_screen() -> None:
                                 password=reg_password,
                                 full_name=reg_name.strip() if reg_name else None,
                             )
-                            st.session_state["token"] = data["access_token"]
-                            st.session_state["user_email"] = data["email"]
-                            st.session_state["user_name"] = data.get("full_name")
+                            start_session(data, remember=True)
                             flash("success", "Hesabınız başarıyla oluşturuldu!")
                             st.rerun()
                         except ApiError as exc:
@@ -382,19 +559,24 @@ def render_sessions() -> None:
 @guarded("Belge yükleme")
 def render_upload() -> None:
     files = st.file_uploader(
-        "PDF yükle",
-        type=["pdf"],
+        "Belge yükle (PDF, DOCX, TXT)",
+        type=SUPPORTED_TYPES,
         accept_multiple_files=True,
         key=f"uploader_{st.session_state.uploader_key}",
-        help=f"Dosya başına en fazla {MAX_UPLOAD_MB} MB.",
+        help=(
+            f"PDF en fazla {MAX_UPLOAD_MB_BY_EXT['pdf']} MB, DOCX en fazla {MAX_UPLOAD_MB_BY_EXT['docx']} MB, "
+            f"TXT en fazla {MAX_UPLOAD_MB_BY_EXT['txt']} MB. Taranmış PDF'lere otomatik OCR uygulanır."
+        ),
     )
     if not st.button("Yükle ve işle", type="primary", disabled=not files):
         return
 
     uploaded = 0
     for file in files:
-        if file.size > MAX_UPLOAD_MB * 1024 * 1024:
-            flash("warning", f"{file.name}: dosya {MAX_UPLOAD_MB} MB sınırını aşıyor.")
+        ext = Path(file.name).suffix.lower().lstrip(".")
+        limit_mb = MAX_UPLOAD_MB_BY_EXT.get(ext, MAX_UPLOAD_MB)
+        if file.size > limit_mb * 1024 * 1024:
+            flash("warning", f"{file.name}: dosya {ext.upper()} için {limit_mb} MB sınırını aşıyor.")
             continue
         try:
             with st.spinner(f"{file.name} yükleniyor..."):
@@ -417,6 +599,8 @@ def render_documents() -> None:
     try:
         docs = api.list_documents()
     except ApiError as exc:
+        if exc.status_code == 401:
+            session_expired()
         st.error(f"Belgeler alınamadı: {exc}")
         if st.button("Tekrar dene", key="retry_docs"):
             st.rerun()
@@ -436,15 +620,19 @@ def render_documents() -> None:
 
     st.subheader(f"Belgelerim ({len(docs)})")
     if not docs:
-        st.caption("Henüz belge yok. Yukarıdan bir PDF yükle.")
+        st.caption("Henüz belge yok. Yukarıdan bir PDF, DOCX veya TXT dosyası yükle.")
     st.button("🔄 Yenile", key="refresh_docs")
 
     for doc in docs:
         with st.container(border=True):
-            st.markdown(f"**{doc['filename']}**")
-            parts = [STATUS_LABELS.get(doc["status"], doc["status"])]
+            ftype = file_type(doc["filename"])
+            st.markdown(f"{ftype['icon']} **{doc['filename']}**")
+            parts = [ftype["label"], STATUS_LABELS.get(doc["status"], doc["status"])]
             if doc["status"] == "completed":
-                parts += [f"{doc['page_count']} sayfa", f"{doc['chunk_count']} parça"]
+                parts += [f"{doc['page_count']} {ftype['unit']}", f"{doc['chunk_count']} parça"]
+                ocr_count = (doc.get("doc_metadata") or {}).get("ocr_page_count")
+                if ocr_count:
+                    parts.append(f"🔍 OCR ({ocr_count} sayfa)")
             parts.append(fmt_size(doc["file_size"]))
             st.caption(" · ".join(parts))
             if doc["status"] == "failed" and doc.get("error_message"):
@@ -516,13 +704,15 @@ def render_sources(sources: list[dict]) -> None:
     with st.expander(f"📎 Kaynaklar ({len(sources)})"):
         for index, source in enumerate(sources, start=1):
             matched_by = source.get("matched_by")
+            ftype = file_type(source["document_name"])
+            name = f"{ftype['icon']} {source['document_name']}"
             if matched_by in ("summary", "full_text"):
-                st.markdown(f"**[{index}] {source['document_name']}** · {ROUTE_LABELS[matched_by]}")
+                st.markdown(f"**[{index}] {name}** · {ROUTE_LABELS[matched_by]}")
             else:
                 page = (
-                    f"sayfa {source['page_number']}"
+                    f"{ftype['unit']} {source['page_number']}"
                     if source.get("page_number")
-                    else "sayfa belirtilmemiş"
+                    else f"{ftype['unit']} belirtilmemiş"
                 )
                 how = f" · {MATCH_LABELS[matched_by]}" if matched_by in MATCH_LABELS else ""
                 rerank = (
@@ -531,7 +721,7 @@ def render_sources(sources: list[dict]) -> None:
                     else ""
                 )
                 st.markdown(
-                    f"**[{index}] {source['document_name']}** · {page} · "
+                    f"**[{index}] {name}** · {ftype['label']} · {page} · "
                     f"skor `{source['score']:.2f}`{how}{rerank}"
                 )
             snippet = " ".join(source["content"].split())
@@ -574,6 +764,8 @@ def ensure_session(scope_ids: list[int]) -> int | None:
 
 def handle_chat_error(exc: ApiError) -> None:
     state = st.session_state
+    if exc.status_code == 401:
+        session_expired()
     st.error(str(exc))
     if state.session_id is not None and "Sohbet bulunamadı" in str(exc):
         state.session_id = None
@@ -652,7 +844,7 @@ def render_chat(top_k: int, use_stream: bool) -> None:
         "Sohbet kapsamı",
         options=list(names),
         key="scope_ids",
-        format_func=lambda doc_id: f"📄 {names[doc_id]}",
+        format_func=lambda doc_id: f"{file_type(names[doc_id])['icon']} {names[doc_id]}",
         placeholder="📚 Tüm belgelerde ara (belge seçerek daraltabilirsin)",
         disabled=not ready,
         max_selections=MAX_SCOPE_DOCUMENTS,
@@ -660,7 +852,7 @@ def render_chat(top_k: int, use_stream: bool) -> None:
     )
 
     if not ready:
-        st.info("Başlamak için soldan bir PDF yükle. İşlem bitince burada soru sorabilirsin.")
+        st.info("Başlamak için soldan bir PDF, DOCX veya TXT dosyası yükle. İşlem bitince burada soru sorabilirsin.")
     elif not state.messages:
         st.caption("Seçili kapsamdaki belgeler hakkında bir soru sor. Takip soruları da sorabilirsin.")
 
@@ -722,6 +914,9 @@ def main() -> None:
             "PostgreSQL'in çalıştığından emin ol (`docker compose up -d`)."
         )
 
+    # Sayfa yenilendiyse (F5) çerezdeki token ile oturumu geri yükle
+    restore_session_from_cookie()
+
     # Oturum açılmamışsa sadece Login / Register formunu göster
     if not st.session_state.get("token"):
         render_auth_screen()
@@ -733,4 +928,12 @@ def main() -> None:
     render_chat(top_k, use_stream)
 
 
-main()
+def run() -> None:
+    main()
+    # Çerez yazma/silme, sayfa normal şekilde çizildikten sonra uygulanır. st.rerun()/st.stop()
+    # istisna fırlattığında BURAYA ulaşılmaz; bekleyen işlem sıradaki çalıştırmaya kalır.
+    # (Bileşeni rerun sırasında çizmek, JS'in çalışmadan sökülmesine yol açabilir.)
+    apply_cookie_action()
+
+
+run()

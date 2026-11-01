@@ -11,11 +11,16 @@ pgvector>=0.3.0
 
 # --- RAG / AI ---
 pypdf>=4.2
+python-docx>=1.1          # .docx okuma (paragraf + tablo)
+pytesseract>=0.3.10       # OCR (sistemde Tesseract gerekir)
+pdf2image>=1.17           # PDF sayfası -> görüntü (sistemde Poppler gerekir)
+Pillow>=10.0              # pdf2image/pytesseract görüntü işleme
 sentence-transformers>=3.0
 google-genai>=1.0          # LLM_PROVIDER=gemini için (resmi Google Gen AI SDK)
 
 # --- Arayüz ---
 streamlit>=1.40
+extra-streamlit-components>=0.1.71,<0.2   # "Beni hatırla" çerezi
 httpx>=0.27
 
 # --- Ortam & Güvenlik ---
