@@ -94,7 +94,7 @@ Kullanıcı *"dosyayı adım adım özetle"* gibi genel bir istekte bulunduğund
 ```mermaid
 flowchart TD
     User([Kullanici]) -->|JWT Auth & HTTP| API[FastAPI Backend]
-    
+
     subgraph Ingestion [Belge Isleme Hatti]
         API -->|PDF / DOCX / TXT| Parser[Metin ve Sayfa Ayristirici]
         Parser --> Chunker[Recursive Text Chunker]
@@ -108,7 +108,7 @@ flowchart TD
         API --> Router{Query Router}
         Router -->|Detay Sorusu| Hybrid[Hibrit Arama Servisi]
         Router -->|Ozet Talebi| SummaryRoute[Belge Ozeti Rotasi]
-        
+
         Hybrid -->|Kosinus Benzerligi| VecSearch[Vektor Aramasi]
         Hybrid -->|FTS / GIN| FTSSearch[Anahtar Kelime Aramasi]
         VecSearch & FTSSearch --> RRF[RRF ve Esik Filtresi]
@@ -117,6 +117,7 @@ flowchart TD
 
     Context & SummaryRoute --> LLM[Google Gemini API]
     LLM -->|Atifli Yanit ve Kaynaklar| User
+```
 
 ---
 
@@ -125,6 +126,7 @@ flowchart TD
 Projeyi **Docker Compose** ile tek komutla tüm bağımlılıklarıyla (PostgreSQL `pgvector` + FastAPI + Streamlit) ayağa kaldırabilirsiniz.
 
 ### 1. Repoyu Klonlayın ve Ortam Değişkenlerini Hazırlayın
+
 ```bash
 git clone https://github.com/akdenizenes/rag-document-assistant.git
 cd rag-document-assistant
@@ -132,6 +134,7 @@ cp .env.example .env
 ```
 
 `.env` dosyasını açarak kendi `GEMINI_API_KEY` anahtarınızı girin:
+
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
 GEMINI_MODEL=gemini-2.5-flash-lite
@@ -142,9 +145,11 @@ HYBRID_FTS_WEIGHT=0.15
 ```
 
 ### 2. Docker ile Başlatın
+
 ```bash
 docker compose up -d --build
 ```
+
 * **Streamlit Arayüzü:** `http://localhost:8501`
 * **FastAPI Swagger Dokümantasyonu:** `http://localhost:8000/docs`
 * **Sağlık Kontrolü (Healthcheck):** `http://localhost:8000/health/ready`
