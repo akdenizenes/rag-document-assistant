@@ -74,7 +74,7 @@ services:
     # Arayüz internete açık olan bileşendir: API sırlarını (JWT, LLM anahtarı) görmesin diye
     # .env.docker'ın tamamı DEĞİL, yalnızca gerekenler verilir.
     environment:
-      API_BASE_URL: ${API_BASE_URL:-http://api:8000}
+      API_BASE_URL: http://api:8000
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-20}
       MAX_UPLOAD_MB_DOCX: ${MAX_UPLOAD_MB_DOCX:-20}
       MAX_UPLOAD_MB_TXT: ${MAX_UPLOAD_MB_TXT:-5}
