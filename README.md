@@ -93,31 +93,30 @@ Kullanıcı *"dosyayı adım adım özetle"* gibi genel bir istekte bulunduğund
 
 ```mermaid
 flowchart TD
-    User([👤 Kullanıcı / Streamlit UI]) -->|JWT Auth & HTTP/SSE| API[⚡ FastAPI Backend]
+    User([Kullanici]) -->|JWT Auth & HTTP| API[FastAPI Backend]
     
-    subgraph Ingestion ["📥 Belge İşleme Hattı (Ingestion Pipeline)"]
-        API -->|PDF / DOCX / TXT| Parser[Metin & Sayfa Ayrıştırıcı]
+    subgraph Ingestion [Belge Isleme Hatti]
+        API -->|PDF / DOCX / TXT| Parser[Metin ve Sayfa Ayristirici]
         Parser --> Chunker[Recursive Text Chunker]
-        Chunker --> Embedder[Yerel Embedding Modeli<br/>multilingual-MiniLM-L12-v2]
-        Chunker --> DocSummary[LLM Belge Özeti & Konu Çıkarımı]
-        Embedder -->|384d Vektör + tsvector| DB[(🐘 PostgreSQL + pgvector)]
+        Chunker --> Embedder[Yerel Embedding Modeli]
+        Chunker --> DocSummary[LLM Belge Ozeti]
+        Embedder -->|Vektor + tsvector| DB[(PostgreSQL + pgvector)]
         DocSummary -->|Metadata| DB
     end
 
-    subgraph Retrieval ["🔍 Sorgu & Hibrit Arama Motoru"]
-        API --> Router{🧭 Query Router}
-        Router -->|Kavram / Detay Sorusu| Hybrid[Hibrit Arama Servisi]
-        Router -->|Özet Talebi| SummaryRoute[📄 Belge Özeti Rotası]
+    subgraph Retrieval [Hibrit Arama Motoru]
+        API --> Router{Query Router}
+        Router -->|Detay Sorusu| Hybrid[Hibrit Arama Servisi]
+        Router -->|Ozet Talebi| SummaryRoute[Belge Ozeti Rotasi]
         
-        Hybrid -->|Kosinüs Benzerliği| VecSearch[Vektör Arama - pgvector]
-        Hybrid -->|GIN İndeks / FTS| FTSSearch[Anahtar Kelime Araması]
-        VecSearch & FTSSearch --> RRF[⚖️ Reciprocal Rank Fusion & Eşik Filtresi]
-        RRF --> Context[Numaralı Bağlam İnşası [1], [2]...]
+        Hybrid -->|Kosinus Benzerligi| VecSearch[Vektor Aramasi]
+        Hybrid -->|FTS / GIN| FTSSearch[Anahtar Kelime Aramasi]
+        VecSearch & FTSSearch --> RRF[RRF ve Esik Filtresi]
+        RRF --> Context[Atifli Baglam]
     end
 
-    Context & SummaryRoute --> LLM[✨ Google Gemini API]
-    LLM -->|Atıflı Yanıt + Kaynak Kartları| User
-```
+    Context & SummaryRoute --> LLM[Google Gemini API]
+    LLM -->|Atifli Yanit ve Kaynaklar| User
 
 ---
 
@@ -127,7 +126,7 @@ Projeyi **Docker Compose** ile tek komutla tüm bağımlılıklarıyla (PostgreS
 
 ### 1. Repoyu Klonlayın ve Ortam Değişkenlerini Hazırlayın
 ```bash
-git clone [https://github.com/se-230717022/rag-document-assistant.git](https://github.com/se-230717022/rag-document-assistant.git)
+git clone https://github.com/akdenizenes/rag-document-assistant.git
 cd rag-document-assistant
 cp .env.example .env
 ```
