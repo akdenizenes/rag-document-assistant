@@ -698,34 +698,40 @@ def render_sidebar() -> tuple[int, bool]:
 # --------------------------------------------------------------------------- #
 # Ana alan: sohbet
 # --------------------------------------------------------------------------- #
-def render_sources(sources: list[dict]) -> None:
+# frontend/streamlit_app.py
+
+def render_sources(sources: list[dict]):
+    """Asistan yanıtının altındaki kaynakları modern kartlar, snippet ve tam metin expander'ı ile gösterir."""
     if not sources:
         return
-    with st.expander(f"📎 Kaynaklar ({len(sources)})"):
-        for index, source in enumerate(sources, start=1):
-            matched_by = source.get("matched_by")
-            ftype = file_type(source["document_name"])
-            name = f"{ftype['icon']} {source['document_name']}"
-            if matched_by in ("summary", "full_text"):
-                st.markdown(f"**[{index}] {name}** · {ROUTE_LABELS[matched_by]}")
-            else:
-                page = (
-                    f"{ftype['unit']} {source['page_number']}"
-                    if source.get("page_number")
-                    else f"{ftype['unit']} belirtilmemiş"
-                )
-                how = f" · {MATCH_LABELS[matched_by]}" if matched_by in MATCH_LABELS else ""
-                rerank = (
-                    f" · yeniden sıralama `{source['rerank_score']:.2f}`"
-                    if source.get("rerank_score") is not None
-                    else ""
-                )
-                st.markdown(
-                    f"**[{index}] {name}** · {ftype['label']} · {page} · "
-                    f"skor `{source['score']:.2f}`{how}{rerank}"
-                )
-            snippet = " ".join(source["content"].split())
-            st.text(snippet if len(snippet) <= 400 else snippet[:400] + "…")
+
+    expander_title = f"📚 Kaynaklar ({len(sources)})"
+    with st.expander(expander_title, expanded=False):
+        for s in sources:
+            ref = s.get("ref", 1)
+            doc_name = s.get("document_name", "Belge")
+            page = s.get("page_number")
+            chunk_idx = s.get("chunk_index", 0)
+            score = s.get("score")
+            snippet = s.get("snippet", "")
+            content = s.get("content", "")
+
+            # Başlık: [ref] Belge Adı (Sayfa X veya Parça Y)
+            location = f"Sayfa {page}" if page else f"Parça {chunk_idx + 1}"
+            score_text = f" • Benzerlik / Skor: `{score:.2f}`" if score is not None else ""
+
+            st.markdown(f"**[{ref}] 📄 {doc_name}** ({location}){score_text}")
+
+            # Kısa snippet özeti
+            if snippet:
+                st.caption(f"_{snippet}_")
+
+            # İçeriğin tam metni için açılır kutu
+            if content:
+                with st.expander(f"[{ref}] Parça Tam Metnini İncele", expanded=False):
+                    st.text(content)
+
+            st.divider()
 
 
 def caption_model(model: str | None, route: str | None) -> None:
