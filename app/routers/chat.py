@@ -45,6 +45,7 @@ from app.dependencies import get_current_user
 from app.models import Document, DocumentStatus, User
 from app.rate_limit import limit_chat
 from app.schemas.chat import ChatMessage, QueryRequest, QueryResponse, SourceChunk
+from app.services.citations import build_sources
 from app.services.llm_service import LLMError, generate_stream
 from app.services.prompts import NO_ANSWER
 from app.services.rag_service import PreparedQuery, answer_question, prepare_query
@@ -116,10 +117,8 @@ async def _resolve_context(db: AsyncSession, user_id: int, payload: QueryRequest
 
 
 def _serialize_sources(chunks: list[RetrievedChunk]) -> list[dict[str, Any]]:
-    return [
-        SourceChunk.model_validate(c, from_attributes=True).model_dump(mode="json")
-        for c in chunks
-    ]
+    """Parçaları `ref` (atıf no) + `snippet` (kısa özet) ile birlikte JSON'a çevirir."""
+    return build_sources(chunks)
 
 
 @router.post("/chat", response_model=QueryResponse, dependencies=[Depends(limit_chat)])
@@ -133,7 +132,8 @@ async def chat(
     - `document_ids` (ya da `document_id`) verilirse yalnızca o belgelerde, verilmezse tüm belgelerde aranır.
     - `session_id` verilirse geçmiş sunucudan okunur ve soru-cevap oturuma kaydedilir;
       verilmezse `history` ile önceki mesajlar gönderilerek takip soruları sorulabilir.
-    - Yanıtla birlikte dayanılan kaynak parçalar (`sources`) döner.
+    - Yanıtla birlikte dayanılan kaynak parçalar (`sources`) döner: her biri `ref` (cevaptaki [n]
+      atfıyla eşleşir), belge adı, chunk id, sayfa/bölüm no, skor, `snippet` (kısa özet) ve tam `content` içerir.
     """
     user_id = user.id  # answer_question içinde oturum sıfırlanacağı için önceden al
     ctx = await _resolve_context(db, user_id, payload)

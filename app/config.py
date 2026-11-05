@@ -92,6 +92,8 @@ RETRIEVAL_MIN_SCORE: float = float(os.getenv("RETRIEVAL_MIN_SCORE", "0.1"))
 # HNSW aramasında bakılan aday sayısı (yüksek = daha isabetli, biraz daha yavaş).
 HNSW_EF_SEARCH: int = int(os.getenv("HNSW_EF_SEARCH", "100"))
 MAX_CONTEXT_CHARS: int = int(os.getenv("MAX_CONTEXT_CHARS", "6000"))
+# Kaynak gösteriminde (citations) her parçanın `snippet` alanının en fazla karakter sayısı.
+SOURCE_SNIPPET_CHARS: int = int(os.getenv("SOURCE_SNIPPET_CHARS", "240"))
 MAX_HISTORY_MESSAGES: int = int(os.getenv("MAX_HISTORY_MESSAGES", "6"))
 
 # --- Hibrit arama (v2): pgvector + PostgreSQL full-text search, RRF ile birleştirilir ---

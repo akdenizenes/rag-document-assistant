@@ -241,11 +241,11 @@ async def hybrid_search_chunks(
         vector_weight=HYBRID_VECTOR_WEIGHT,
         fts_weight=HYBRID_FTS_WEIGHT,
     )
+
     logger.info(
-        "Hibrit arama: vektör=%d, anahtar kelime=%d aday -> %d sonuç. (kosinüs, rrf, kaynak): %s",
+        "Hibrit arama: vektör=%d, anahtar kelime=%d aday -> %d sonuç.",
         len(vector_hits),
         len(fts_hits),
         len(results),
-        [(r.score, r.rrf_score, r.matched_by) for r in results],
     )
     return results

@@ -77,13 +77,27 @@ class SourceChunk(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    ref: int | None = Field(
+        default=None,
+        description=(
+            "Atıf numarası (1'den başlar). LLM'e verilen bağlamdaki [n] etiketiyle aynıdır; cevapta "
+            "geçen [1], [2] gibi atıflar bu alanla eşleşir. (Eski kayıtlı oturumlarda None olabilir.)"
+        ),
+    )
     chunk_id: int
     document_id: int
     document_name: str
     chunk_index: int
-    page_number: int | None = None
+    page_number: int | None = Field(
+        default=None,
+        description="PDF'te sayfa no; DOCX/TXT'de gerçek sayfa olmadığından bölüm no.",
+    )
     score: float = Field(description="Kosinüs benzerliği (1'e yakın = daha ilgili)")
-    content: str
+    snippet: str | None = Field(
+        default=None,
+        description="Parça metninin kısaltılmış özeti (kaynak listesinde göstermek için).",
+    )
+    content: str = Field(description="Parçanın tam metni")
     rrf_score: float | None = Field(
         default=None, description="Hibrit aramada RRF birleştirme skoru (sıralama bununla yapılır)"
     )
