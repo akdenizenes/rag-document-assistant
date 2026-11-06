@@ -1,4 +1,4 @@
-# 📄 RAG Belge Asistanı (Full-Stack Document QA & Intelligent Routing System)
+# 📄 RAG Document Assistant (Full-Stack Document QA & Intelligent Routing System)
 
 ![Python](https://img.shields.io/badge/Python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
@@ -7,125 +7,125 @@
 ![Docker](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Google_Gemini-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white)
 
-**RAG Belge Asistanı**, kullanıcıların yüklediği **PDF, DOCX ve TXT** formatındaki belgeler üzerinde yüksek doğruluklu soru-cevap, adım adım özetleme ve çapraz dil (Cross-Lingual) bilgi çıkarımı yapan uçtan uca (Full-Stack) bir **Retrieval-Augmented Generation (RAG)** sistemidir.
+**RAG Document Assistant** is an end-to-end (Full-Stack) **Retrieval-Augmented Generation (RAG)** system that performs high-accuracy question answering, step-by-step summarization, and cross-lingual information extraction over user-uploaded **PDF, DOCX, and TXT** documents.
 
-Klasik vektör arama sistemlerindeki "anahtar kelime kaçırma", "farklı dildeki belgeleri eşleştirememe" ve "kaynaksız/halüsinasyonlu yanıt üretme" problemlerini; **Çok Dilli Hibrit Arama (Vektör + Tam Metin Araması + RRF)**, **Akıllı Sorgu Yönlendirme (Query Routing)** ve **Doğrulanabilir Satır İçi Kaynak Gösterimi (Inline Citations)** mimarisiyle çözer.
-
----
-
-## 🌟 Temel Özellikler
-
-* **🔍 Hibrit Arama Motoru (Vector + Full-Text Search + RRF):**
-  * **Anlamsal Arama (Semantic):** `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` (384 boyutlu) yerel modeli ve `pgvector` HNSW/kosinüs indeksi ile Türkçe sorgularla İngilizce belgeler arasında bile yüksek anlamsal eşleşme sağlar.
-  * **Anahtar Kelime Araması (Lexical):** PostgreSQL `tsvector` ve GIN indeksleri ile özel terimleri, kısaltmaları ve birebir kelimeleri yakalar.
-  * **Reciprocal Rank Fusion (RRF):** İki arama kolundan gelen adayları ağırlıklı sıralama füzyonu (`fuse_ranked_chunks`) ve dinamik eşik filtreleriyle birleştirir.
-* **🧭 Akıllı Sorgu Yönlendirme (Intelligent Query Router):**
-  * Kullanıcının niyetini analiz ederek sorguyu otomatik olarak en uygun rotaya yönlendirir:
-    * `🔍 Hibrit arama`: Spesifik bilgi ve kavram sorularında ilgili sayfa/parçaları getirir.
-    * `📄 Belge özeti`: Belgenin bütününe dair özet taleplerinde yükleme anında çıkarılan yapılandırılmış belge özetlerini ve konu başlıklarını kullanır.
-    * `📑 Tam metin`: Kısa belgelerde bağlam bütünlüğü gerektiren analizleri doğrudan işler.
-* **📚 Doğrulanabilir Kaynak Gösterimi (Inline Citations & Source Cards):**
-  * Model, ürettiği her bilginin sonuna `[1]`, `[2]` biçiminde satır içi atıf ekler.
-  * Yanıtın altındaki açılır **Kaynaklar** panelinde; ilgili parçanın hangi belgeden, kaçıncı sayfadan geldiği, benzerlik skoru (`0.23`, `0.37` vb.), eşleşme türü (`anlamsal + anahtar kelime`) ve orijinal metin kesiti (snippet) şeffaf biçimde sunulur.
-* **🛡️ Halüsinasyon Koruması & Prompt Guardrails:**
-  * Bağlamda yer almayan konularda bilgi uydurmayı reddeder, belge içi prompt enjeksiyonlarına (Prompt Injection) karşı bağlamı güvenilmeyen veri olarak izole eder.
-* **🔐 Çok Kullanıcılı Oturum & Kalıcı Sohbet Hafızası:**
-  * JWT tabanlı kimlik doğrulama (`Giriş Yap / Kayıt Ol`), kullanıcı bazlı izole belge kütüphanesi, çoklu sohbet oturumu yönetimi ve canlı yanıt akışı (SSE Streaming) desteklenir.
+It solves the classic problems of vector search systems — "missed keywords", "inability to match documents in a different language", and "unsourced/hallucinated answers" — with a **Multilingual Hybrid Search (Vector + Full-Text Search + RRF)**, **Intelligent Query Routing**, and **Verifiable Inline Citations** architecture.
 
 ---
 
-## 🖼️ Ekran Görüntüleri ve Uygulama Akışı
+## 🌟 Key Features
 
-### 1. Kullanıcı Kimlik Doğrulama (JWT Authentication)
-Kullanıcılar kendi belge kütüphanelerine ve geçmiş sohbet oturumlarına güvenli şekilde erişmek için sisteme kayıt olur veya giriş yapar. Her kullanıcının verisi veritabanı düzeyinde (`user_id`) izole edilir.
-
-![Kimlik Doğrulama Ekranı](assets/01_auth_screen.png)
+* **🔍 Hybrid Search Engine (Vector + Full-Text Search + RRF):**
+  * **Semantic Search:** The local `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` model (384 dimensions) and a `pgvector` HNSW/cosine index deliver strong semantic matching, even between Turkish queries and English documents.
+  * **Lexical Search:** PostgreSQL `tsvector` and GIN indexes capture special terms, abbreviations, and exact word matches.
+  * **Reciprocal Rank Fusion (RRF):** Candidates from both search branches are merged using weighted rank fusion (`fuse_ranked_chunks`) and dynamic threshold filters.
+* **🧭 Intelligent Query Router:**
+  * Analyzes the user's intent and automatically routes the query to the most suitable path:
+    * `🔍 Hybrid search`: Retrieves relevant pages/chunks for specific information and concept questions.
+    * `📄 Document summary`: For requests about the document as a whole, uses the structured document summaries and topic headings extracted at upload time.
+    * `📑 Full text`: Directly handles analyses that require full-context integrity in short documents.
+* **📚 Verifiable Citations (Inline Citations & Source Cards):**
+  * The model appends inline citations in the form `[1]`, `[2]` to every piece of information it produces.
+  * In the expandable **Sources** panel below the answer, the system transparently shows which document and page each chunk came from, its similarity score (`0.23`, `0.37`, etc.), the match type (`semantic + keyword`), and the original text excerpt (snippet).
+* **🛡️ Hallucination Protection & Prompt Guardrails:**
+  * Refuses to invent information on topics not present in the context, and isolates the context as untrusted data against in-document prompt injection attacks.
+* **🔐 Multi-User Sessions & Persistent Chat Memory:**
+  * Supports JWT-based authentication (`Log In / Sign Up`), per-user isolated document libraries, multiple chat session management, and live response streaming (SSE Streaming).
 
 ---
 
-### 2. Belge Yükleme ve Arama Parametreleri
-Sol panel üzerinden **PDF, DOCX ve TXT** (25 MB'a kadar) belgeler yüklenir. Kullanıcı, RAG motorunun getireceği parça sayısını (`top_k`) ve yanıtların canlı akışla (`streaming`) yazılıp yazılmayacağını anlık olarak ayarlayabilir.
+## 🖼️ Screenshots and Application Flow
 
-| Belge Yükleme & RAG Ayarları | Sohbet Oturumu Yönetimi |
+### 1. User Authentication (JWT Authentication)
+Users sign up or log in to securely access their own document libraries and past chat sessions. Each user's data is isolated at the database level (`user_id`).
+
+![Authentication Screen](assets/01_auth_screen.png)
+
+---
+
+### 2. Document Upload and Search Parameters
+**PDF, DOCX, and TXT** documents (up to 25 MB) are uploaded from the left panel. Users can adjust, in real time, the number of chunks the RAG engine retrieves (`top_k`) and whether responses are written with live streaming.
+
+| Document Upload & RAG Settings | Chat Session Management |
 | :---: | :---: |
-| ![Sol Panel Belge Yükleme](assets/02_sidebar_upload.png) | ![Sohbetler Sekmesi](assets/03_chat_sessions_empty.png) |
+| ![Sidebar Document Upload](assets/02_sidebar_upload.png) | ![Chats Tab](assets/03_chat_sessions_empty.png) |
 
 ---
 
-### 3. Ana Çalışma Alanı ve Kapsam Filtreleme (Scope Selection)
-Kullanıcılar aramayı tüm belgeler üzerinde yapabileceği gibi, üstteki **Sohbet kapsamı** seçicisiyle yalnızca belirli bir belge veya belge grubu içinde daraltabilir. Ayrıca arayüz Sistem, Açık (Light) ve Koyu (Dark) tema modlarını destekler.
+### 3. Main Workspace and Scope Selection
+Users can run searches across all documents, or narrow them to a specific document or group of documents using the **Chat scope** selector at the top. The interface also supports System, Light, and Dark theme modes.
 
-![Ana Çalışma Alanı](assets/04_main_workspace.png)
+![Main Workspace](assets/04_main_workspace.png)
 
 <details>
-<summary>🎨 <b>Tema ve Görünüm Ayarları (Görmek için tıklayın)</b></summary>
+<summary>🎨 <b>Theme and Appearance Settings (Click to view)</b></summary>
 <br>
 
-![Tema Ayarları](assets/05_theme_settings.png)
+![Theme Settings](assets/05_theme_settings.png)
 </details>
 
 ---
 
-### 4. Otomatik Belge İşleme, Parçalama (Chunking) ve Özet Çıkarımı
-Yüklenen belgeler arka planda metne dönüştürülür, sayfa numaraları korunarak anlamlı parçalara (chunks) bölünür, vektörleştirilir ve her belge için otomatik olarak **Özet ve Konular** metaverisi oluşturulur. Örneğin 47 sayfalık `Agile Software Engineering.pdf` 72 parçaya, 26 sayfalık `Software Products.pdf` 43 parçaya ayrılarak hazır hale getirilmiştir.
+### 4. Automatic Document Processing, Chunking, and Summary Extraction
+Uploaded documents are converted to text in the background, split into meaningful chunks while preserving page numbers, vectorized, and a **Summary and Topics** metadata record is automatically generated for each document. For example, the 47-page `Agile Software Engineering.pdf` was split into 72 chunks, and the 26-page `Software Products.pdf` into 43 chunks, and both were made ready for querying.
 
-![İşlenmiş Belgeler](assets/06_processed_documents.png)
-
----
-
-### 5. Çok Dilli Hibrit Arama ve Doğrulanabilir Kaynak Gösterimi (Citations)
-Kullanıcı **Türkçe** olarak *"moore vizyonu nedir"* sorusunu sorduğunda, sistem **İngilizce** `1. Software Products.pdf` belgesinin **13. sayfasındaki** *"Moore's vision template"* slaytını `anlamsal + anahtar kelime` hibrit eşleşmesiyle yakalar. Yanıtı maddeler halinde Türkçe sentezler, her maddeye `[1]` atfını ekler ve alt panelde tüm kaynak detaylarını (`skor`, `sayfa`, `snippet`) listeler.
-
-![Hibrit Arama ve Kaynaklar](assets/07_hybrid_search_citations.png)
+![Processed Documents](assets/06_processed_documents.png)
 
 ---
 
-### 6. Akıllı Sorgu Yönlendirme: Belge Özeti Rotası ve Kalıcı Sohbet Geçmişi
-Kullanıcı *"dosyayı adım adım özetle"* gibi genel bir istekte bulunduğunda, Sorgu Yönlendirici (Router) otomatik olarak **`Rota: 📄 Belge özeti`** moduna geçer ve belgenin tüm ana başlıklarını adım adım özetler. Oluşturulan tüm diyaloglar sol menüdeki **Sohbetler** sekmesinde otomatik başlıkla kaydedilir.
+### 5. Multilingual Hybrid Search and Verifiable Citations
+When the user asks the question *"moore vizyonu nedir"* ("what is Moore's vision") in **Turkish**, the system finds the *"Moore's vision template"* slide on **page 13** of the **English** `1. Software Products.pdf` document through a `semantic + keyword` hybrid match. It synthesizes the answer in Turkish as bullet points, adds a `[1]` citation to each point, and lists all source details (`score`, `page`, `snippet`) in the panel below.
 
-| Otomatik Kaydedilen Sohbet Geçmişi | Akıllı Rota: Belge Özeti (`📄 Belge özeti`) |
+![Hybrid Search and Sources](assets/07_hybrid_search_citations.png)
+
+---
+
+### 6. Intelligent Query Routing: Document Summary Route and Persistent Chat History
+When the user makes a general request such as *"summarize the file step by step"*, the Query Router automatically switches to **`Route: 📄 Document summary`** mode and summarizes all main sections of the document step by step. All conversations are automatically saved with an auto-generated title in the **Chats** tab in the left menu.
+
+| Automatically Saved Chat History | Smart Route: Document Summary (`📄 Document summary`) |
 | :---: | :---: |
-| ![Aktif Sohbet Geçmişi](assets/08_chat_history_active.png) | ![Belge Özeti Rotası](assets/09_summary_routing.png) |
+| ![Active Chat History](assets/08_chat_history_active.png) | ![Document Summary Route](assets/09_summary_routing.png) |
 
 ---
 
-## 🏗️ Sistem Mimarisi
+## 🏗️ System Architecture
 
 ```mermaid
 flowchart TD
-    User([Kullanici]) -->|JWT Auth & HTTP| API[FastAPI Backend]
+    User([User]) -->|JWT Auth & HTTP| API[FastAPI Backend]
 
-    subgraph Ingestion [Belge Isleme Hatti]
-        API -->|PDF / DOCX / TXT| Parser[Metin ve Sayfa Ayristirici]
+    subgraph Ingestion [Document Processing Pipeline]
+        API -->|PDF / DOCX / TXT| Parser[Text and Page Parser]
         Parser --> Chunker[Recursive Text Chunker]
-        Chunker --> Embedder[Yerel Embedding Modeli]
-        Chunker --> DocSummary[LLM Belge Ozeti]
-        Embedder -->|Vektor + tsvector| DB[(PostgreSQL + pgvector)]
+        Chunker --> Embedder[Local Embedding Model]
+        Chunker --> DocSummary[LLM Document Summary]
+        Embedder -->|Vector + tsvector| DB[(PostgreSQL + pgvector)]
         DocSummary -->|Metadata| DB
     end
 
-    subgraph Retrieval [Hibrit Arama Motoru]
+    subgraph Retrieval [Hybrid Search Engine]
         API --> Router{Query Router}
-        Router -->|Detay Sorusu| Hybrid[Hibrit Arama Servisi]
-        Router -->|Ozet Talebi| SummaryRoute[Belge Ozeti Rotasi]
+        Router -->|Detail Question| Hybrid[Hybrid Search Service]
+        Router -->|Summary Request| SummaryRoute[Document Summary Route]
 
-        Hybrid -->|Kosinus Benzerligi| VecSearch[Vektor Aramasi]
-        Hybrid -->|FTS / GIN| FTSSearch[Anahtar Kelime Aramasi]
-        VecSearch & FTSSearch --> RRF[RRF ve Esik Filtresi]
-        RRF --> Context[Atifli Baglam]
+        Hybrid -->|Cosine Similarity| VecSearch[Vector Search]
+        Hybrid -->|FTS / GIN| FTSSearch[Keyword Search]
+        VecSearch & FTSSearch --> RRF[RRF and Threshold Filter]
+        RRF --> Context[Cited Context]
     end
 
     Context & SummaryRoute --> LLM[Google Gemini API]
-    LLM -->|Atifli Yanit ve Kaynaklar| User
+    LLM -->|Cited Answer and Sources| User
 ```
 
 ---
 
-## 🚀 Kurulum ve Çalıştırma
+## 🚀 Installation and Running
 
-Projeyi **Docker Compose** ile tek komutla tüm bağımlılıklarıyla (PostgreSQL `pgvector` + FastAPI + Streamlit) ayağa kaldırabilirsiniz.
+You can bring up the whole project with all its dependencies (PostgreSQL `pgvector` + FastAPI + Streamlit) with a single command using **Docker Compose**.
 
-### 1. Repoyu Klonlayın ve Ortam Değişkenlerini Hazırlayın
+### 1. Clone the Repo and Prepare Environment Variables
 
 ```bash
 git clone https://github.com/akdenizenes/rag-document-assistant.git
@@ -133,7 +133,7 @@ cd rag-document-assistant
 cp .env.example .env
 ```
 
-`.env` dosyasını açarak kendi `GEMINI_API_KEY` anahtarınızı girin:
+Open the `.env` file and enter your own `GEMINI_API_KEY`:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key_here
@@ -144,49 +144,55 @@ HYBRID_VECTOR_WEIGHT=0.85
 HYBRID_FTS_WEIGHT=0.15
 ```
 
-### 2. Docker ile Başlatın
+### 2. Start with Docker
 
 ```bash
 docker compose up -d --build
 ```
 
-* **Streamlit Arayüzü:** `http://localhost:8501`
-* **FastAPI Swagger Dokümantasyonu:** `http://localhost:8000/docs`
-* **Sağlık Kontrolü (Healthcheck):** `http://localhost:8000/health/ready`
+* **Streamlit UI:** `http://localhost:8501`
+* **FastAPI Swagger Documentation:** `http://localhost:8000/docs`
+* **Health Check:** `http://localhost:8000/health/ready`
 
 ---
 
-## 📂 Proje Dizin Yapısı
+## 📂 Project Directory Structure
 
 ```text
 rag-document-assistant/
 ├── app/
-│   ├── main.py                 # FastAPI uygulama girişi ve yaşam döngüsü (lifespan)
-│   ├── config.py               # Ortam değişkenleri ve RAG hiperparametreleri
-│   ├── database.py             # Async SQLAlchemy & PostgreSQL bağlantı yönetimi
-│   ├── models/                 # Veritabanı tabloları (User, Document, Chunk, ChatSession)
-│   ├── routers/                # API uç noktaları (auth, documents, chat, health)
-│   ├── schemas/                # Pydantic veri doğrulama ve yanıt şemaları
+│   ├── main.py                 # FastAPI application entry point and lifespan
+│   ├── config.py               # Environment variables and RAG hyperparameters
+│   ├── database.py             # Async SQLAlchemy & PostgreSQL connection management
+│   ├── models/                 # Database tables (User, Document, Chunk, ChatSession)
+│   ├── routers/                # API endpoints (auth, documents, chat, health)
+│   ├── schemas/                # Pydantic validation and response schemas
 │   └── services/
-│       ├── embedding_service.py # Çok dilli yerel SentenceTransformer servisi
-│       ├── retrieval_service.py # Vektör + FTS hibrit arama ve RRF füzyon algoritması
-│       ├── query_router.py      # Akıllı sorgu sınıflandırma ve yönlendirme
-│       ├── citations.py         # Atıf ayıklama ve kaynak referans eşleştirme
-│       ├── prompts.py           # Sistem kuralları ve numaralı bağlam oluşturucu
-│       └── llm_service.py       # Google GenAI (Gemini) üretim ve akış (streaming) servisi
+│       ├── embedding_service.py # Multilingual local SentenceTransformer service
+│       ├── retrieval_service.py # Vector + FTS hybrid search and RRF fusion algorithm
+│       ├── query_router.py      # Intelligent query classification and routing
+│       ├── citations.py         # Citation extraction and source reference matching
+│       ├── prompts.py           # System rules and numbered context builder
+│       └── llm_service.py       # Google GenAI (Gemini) generation and streaming service
 ├── frontend/
-│   └── streamlit_app.py        # Hataya dayanıklı, çoklu oturum destekli Streamlit arayüzü
-├── scripts/                    # Veritabanı şema migrasyon betikleri (v1, v2, v3)
-├── tests/                      # Birim ve entegrasyon testleri (pytest)
-├── assets/                     # Uygulama ekran görüntüleri
-├── docker-compose.yml          # Çoklu konteyner orkestrasyonu (db, api, frontend)
-└── requirements.txt            # Python kütüphane bağımlılıkları
+│   └── streamlit_app.py        # Fault-tolerant, multi-session Streamlit interface
+├── scripts/                    # Database schema migration scripts (v1, v2, v3)
+├── tests/                      # Unit and integration tests (pytest)
+├── assets/                     # Application screenshots
+├── docker-compose.yml          # Multi-container orchestration (db, api, frontend)
+└── requirements.txt            # Python library dependencies
 ```
 
 ---
 
-## 🧪 Testleri Çalıştırma
+## 🧪 Running the Tests
 
 ```bash
 pytest -q
 ```
+
+---
+
+## 📜 License
+
+MIT © 2026 Enes Akdeniz
