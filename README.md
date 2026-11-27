@@ -5,6 +5,7 @@
 ![PostgreSQL](https://img.shields.io/badge/PostgreSQL_16-pgvector-4169E1?style=for-the-badge&logo=postgresql&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker_Compose-2496ED?style=for-the-badge&logo=docker&logoColor=white)
+![CI](https://github.com/akdenizenes/rag-document-assistant/actions/workflows/ci.yml/badge.svg)
 ![Gemini](https://img.shields.io/badge/Google_Gemini-8E75B2?style=for-the-badge&logo=googlegemini&logoColor=white)
 
 **RAG Document Assistant** is an end-to-end (Full-Stack) **Retrieval-Augmented Generation (RAG)** system for question answering, step-by-step summarization, and cross-lingual information extraction over user-uploaded **PDF, DOCX, and TXT** documents.
