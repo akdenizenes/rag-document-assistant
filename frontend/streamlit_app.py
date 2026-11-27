@@ -20,6 +20,7 @@ import itertools
 import json
 import logging
 import os
+import re
 import sys
 import traceback
 from collections.abc import Callable
@@ -700,10 +701,18 @@ def render_sidebar() -> tuple[int, bool]:
 # --------------------------------------------------------------------------- #
 # frontend/streamlit_app.py
 
-def render_sources(sources: list[dict]):
-    """Asistan yanıtının altındaki kaynakları modern kartlar, snippet ve tam metin expander'ı ile gösterir."""
+def render_sources(sources: list[dict], answer: str = ""):
+    """Cevapta atıf yapılan kaynakları gösterir; atıf yoksa hepsini gösterir."""
     if not sources:
         return
+
+    # [1], [1, 2] biçimindeki atıfları topla
+    cited = {
+        int(number)
+        for group in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
+        for number in group.split(",")
+    }
+    sources = [s for s in sources if s.get("ref") in cited] or sources
 
     expander_title = f"📚 Kaynaklar ({len(sources)})"
     with st.expander(expander_title, expanded=False):
@@ -749,7 +758,7 @@ def render_message(message: dict) -> None:
         content = message.get("content") or message.get("answer") or ""
         st.markdown(content)
         if message["role"] == "assistant":
-            render_sources(message.get("sources", []))
+            render_sources(message.get("sources", []), content)
             caption_model(message.get("model"), message.get("route"))
 
 
@@ -806,7 +815,7 @@ def answer_streaming(
         st.error("Modelden boş yanıt geldi.")
         return None
 
-    render_sources(stream.sources)
+    render_sources(stream.sources, answer)
     caption_model(stream.model, stream.route)
     return {
         "answer": answer,
@@ -828,7 +837,7 @@ def answer_blocking(
         handle_chat_error(exc)
         return None
     st.markdown(result["answer"])
-    render_sources(result["sources"])
+    render_sources(result["sources"], result["answer"])
     caption_model(result["model"], result.get("route"))
     return {
         "answer": result["answer"],

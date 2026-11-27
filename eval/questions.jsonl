@@ -1,0 +1,52 @@
+# Retrieval evaluation set for the two course PDFs (1. Software Products.pdf, 2. Agile Software Engineering.pdf).
+# Page numbers are the PDF viewer's physical page numbers (same as the app's page_number).
+# Every label was checked against the extracted page text. Spot-check a few against the PDF yourself.
+{"id": "q01", "question": "Müşteriye özel yazılım projelerinde geliştirme süreci neyle başlar?", "doc": "Software Products", "pages": [5], "lang": "tr"}
+{"id": "q02", "question": "Bir yazılım ürününün geliştirilmesine ne yol açar?", "doc": "Software Products", "pages": [7], "lang": "tr"}
+{"id": "q03", "question": "Why is rapid delivery essential for software products?", "doc": "Software Products", "pages": [7], "lang": "en"}
+{"id": "q04", "question": "What is a software product line?", "doc": "Software Products", "pages": [8], "lang": "en"}
+{"id": "q05", "question": "Facebook neden bir platform örneği olarak gösteriliyor?", "doc": "Software Products", "pages": [8], "lang": "tr"}
+{"id": "q06", "question": "Ürünün bütün özellikleri üreticinin sunucularında çalışıyor ve müşteri tarayıcıdan erişiyorsa bu hangi yürütme modelidir?", "doc": "Software Products", "pages": [9], "lang": "tr"}
+{"id": "q07", "question": "What are the three software execution models?", "doc": "Software Products", "pages": [9, 25], "lang": "en"}
+{"id": "q08", "question": "What three questions should a product vision answer?", "doc": "Software Products", "pages": [12], "lang": "en"}
+{"id": "q09", "question": "Moore vizyon şablonunda UNLIKE kısmında ne yazılır?", "doc": "Software Products", "pages": [13], "lang": "tr"}
+{"id": "q10", "question": "moore vizyonu nedir", "doc": "Software Products", "pages": [13], "lang": "tr"}
+{"id": "q11", "question": "Show an example of a product vision for a CRM product.", "doc": "Software Products", "pages": [14], "lang": "en"}
+{"id": "q12", "question": "What information sources can feed into a product vision?", "doc": "Software Products", "pages": [15], "lang": "en"}
+{"id": "q13", "question": "iLearn sistemi Moodle gibi sanal öğrenme ortamlarından nasıl ayrışır?", "doc": "Software Products", "pages": [16], "lang": "tr"}
+{"id": "q14", "question": "Why must product managers look outward rather than focus on the software?", "doc": "Software Products", "pages": [17], "lang": "en"}
+{"id": "q15", "question": "Ürün yöneticisinin ilgilenmesi gereken üç ana konu nedir?", "doc": "Software Products", "pages": [18, 19], "lang": "tr"}
+{"id": "q16", "question": "What is vision drift and how should the product manager prevent it?", "doc": "Software Products", "pages": [21], "lang": "en"}
+{"id": "q17", "question": "Ürün yol haritası (product roadmap) nedir ve değişikliklerde son kararı kim verir?", "doc": "Software Products", "pages": [21], "lang": "tr"}
+{"id": "q18", "question": "Prototip, ürün geliştirildikten sonra ne yapılmalıdır?", "doc": "Software Products", "pages": [23], "lang": "tr"}
+{"id": "q19", "question": "What are the two stages of prototyping?", "doc": "Software Products", "pages": [24], "lang": "en"}
+{"id": "q20", "question": "Ürün yöneticileri geliştirme ekibiyle çalışırken kullanıcı yerine geçen biri gibi nasıl davranmalıdır?", "doc": "Software Products", "pages": [22], "lang": "tr"}
+{"id": "q21", "question": "Plan odaklı geliştirme neden hızlı yazılım teslimini desteklemez?", "doc": "Agile Software Engineering", "pages": [3], "lang": "tr"}
+{"id": "q22", "question": "Çevik manifestoda hangi değerler öne çıkarılır?", "doc": "Agile Software Engineering", "pages": [4], "lang": "tr"}
+{"id": "q23", "question": "Artımlı geliştirmede hangi özellikler önce gerçekleştirilir?", "doc": "Agile Software Engineering", "pages": [5], "lang": "tr"}
+{"id": "q24", "question": "What activities make up one increment of incremental development?", "doc": "Agile Software Engineering", "pages": [6, 7], "lang": "en"}
+{"id": "q25", "question": "Çevik ilkelerde 'değişimi kucakla' ne anlama gelir?", "doc": "Agile Software Engineering", "pages": [8], "lang": "tr"}
+{"id": "q26", "question": "What does 'focus on people, not things' mean in agile development?", "doc": "Agile Software Engineering", "pages": [9], "lang": "en"}
+{"id": "q27", "question": "Extreme Programming adını kim, hangi yıl verdi?", "doc": "Agile Software Engineering", "pages": [10], "lang": "tr"}
+{"id": "q28", "question": "Test odaklı geliştirmede testler neden koddan önce yazılır?", "doc": "Agile Software Engineering", "pages": [12], "lang": "tr"}
+{"id": "q29", "question": "What is continuous integration?", "doc": "Agile Software Engineering", "pages": [13, 36], "lang": "en"}
+{"id": "q30", "question": "What is velocity in Scrum?", "doc": "Agile Software Engineering", "pages": [16], "lang": "en"}
+{"id": "q31", "question": "Sprint çıktısının müşteriye dağıtılabilecek kalitede olması ne demektir?", "doc": "Agile Software Engineering", "pages": [16, 18, 47], "lang": "tr"}
+{"id": "q32", "question": "Who keeps the development team focused on the product instead of technically interesting but less relevant work?", "doc": "Agile Software Engineering", "pages": [17], "lang": "en"}
+{"id": "q33", "question": "ScrumMaster klasik bir proje yöneticisinden nasıl ayrılır?", "doc": "Agile Software Engineering", "pages": [17, 44], "lang": "tr"}
+{"id": "q34", "question": "Bir Scrum geliştirme ekibi kaç kişiden oluşur?", "doc": "Agile Software Engineering", "pages": [15, 40], "lang": "tr"}
+{"id": "q35", "question": "What are the top five benefits of using Scrum?", "doc": "Agile Software Engineering", "pages": [20], "lang": "en"}
+{"id": "q36", "question": "Product backlog öğeleri hangi durumlardan geçer?", "doc": "Agile Software Engineering", "pages": [24], "lang": "tr"}
+{"id": "q37", "question": "What are the four product backlog activities?", "doc": "Agile Software Engineering", "pages": [25, 26], "lang": "en"}
+{"id": "q38", "question": "Story point nedir ve nasıl tahmin edilir?", "doc": "Agile Software Engineering", "pages": [27], "lang": "tr"}
+{"id": "q39", "question": "Sprint süresi dolduğunda tamamlanmayan işler ne olur?", "doc": "Agile Software Engineering", "pages": [28, 30], "lang": "tr"}
+{"id": "q40", "question": "What are the benefits of timeboxed sprints?", "doc": "Agile Software Engineering", "pages": [29], "lang": "en"}
+{"id": "q41", "question": "Sprint planlamasının çıktısı nedir?", "doc": "Agile Software Engineering", "pages": [34], "lang": "tr"}
+{"id": "q42", "question": "What are the three kinds of sprint goals?", "doc": "Agile Software Engineering", "pages": [32, 33], "lang": "en"}
+{"id": "q43", "question": "Günlük scrum toplantıları neden ayakta yapılır?", "doc": "Agile Software Engineering", "pages": [35], "lang": "tr"}
+{"id": "q44", "question": "Bir kodun 'tamamlanmış' sayılması için hangi kriterler sağlanmalıdır?", "doc": "Agile Software Engineering", "pages": [37], "lang": "tr"}
+{"id": "q45", "question": "Who has the final authority to decide whether the sprint goal was achieved?", "doc": "Agile Software Engineering", "pages": [38], "lang": "en"}
+{"id": "q46", "question": "Kendi kendini organize eden takımların avantajı nedir?", "doc": "Agile Software Engineering", "pages": [40], "lang": "tr"}
+{"id": "q47", "question": "Why can't external communication simply be rotated among team members?", "doc": "Agile Software Engineering", "pages": [44], "lang": "en"}
+{"id": "q48", "question": "Scrum ile Extreme Programming arasındaki temel fark nedir?", "doc": "Agile Software Engineering", "pages": [46], "lang": "tr"}
+{"id": "q49", "question": "Sprint'in sonunda ne olur?", "doc": "Agile Software Engineering", "pages": [28, 30, 38], "lang": "tr"}
