@@ -58,7 +58,7 @@ def test_ref_matches_context_labels_sent_to_llm():
     context, used = build_context(chunks)
     sources = build_sources(chunks[:used])
     for s in sources:
-        assert f"[{s['ref']}] Kaynak: {s['document_name']}" in context
+        assert f"[{s['ref']}] Belge: {s['document_name']}" in context
 
 
 def test_old_stored_sources_without_ref_still_validate():

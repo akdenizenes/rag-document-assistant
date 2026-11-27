@@ -1,0 +1,22 @@
+# Retrieval evaluation set. One JSON object per line; lines starting with '#' are ignored.
+# Copy to eval/questions.jsonl and replace the examples with your own questions.
+#
+#   id       unique label (optional; auto-numbered if omitted)
+#   question the text you would type into the chat box
+#   doc      a phrase contained in the uploaded document's filename (case-insensitive)
+#   pages    page number(s) where the answer actually is  <- check these by hand in the PDF viewer
+#   lang     "tr" / "en" ... (optional; produces a per-language table)
+#
+# Tips for a set that actually discriminates between retrieval modes (aim for 30-50 questions):
+#   - Mix Turkish questions over English documents and vice versa (tests the multilingual embedding).
+#   - Include exact-term questions (acronyms, template names, numbers): FTS should win these.
+#   - Include paraphrased / conceptual questions that avoid the document's own wording: vectors should win these.
+#   - Include a few vague questions. If every mode scores 100%, the set is too easy to prove anything.
+#   - Do NOT write questions by copying a sentence from the page; that only measures string matching.
+#
+# The first row comes from the README's own demo (page 13 of the Software Products PDF). Verify that the
+# page numbering matches `page_number` in your database before trusting the numbers.
+{"id": "q01", "question": "moore vizyonu nedir", "doc": "Software Products", "pages": [13], "lang": "tr"}
+# {"id": "q02", "question": "TODO: a Turkish question about the Agile Software Engineering PDF", "doc": "Agile Software Engineering", "pages": [0], "lang": "tr"}
+# {"id": "q03", "question": "TODO: an English paraphrase question", "doc": "Software Products", "pages": [0], "lang": "en"}
+# {"id": "q04", "question": "TODO: an exact-term question (acronym / template name)", "doc": "Agile Software Engineering", "pages": [0], "lang": "en"}
