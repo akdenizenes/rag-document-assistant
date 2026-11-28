@@ -15,10 +15,7 @@ Windows:
   - Tesseract: https://github.com/UB-Mannheim/tesseract/wiki  (kurulumda "Turkish" dilini seç, PATH'e ekle)
   - Poppler:   https://github.com/oschwartz10612/poppler-windows/releases  (bin klasörünü PATH'e ekle)
 
-Docker imajı kullanıyorsan Dockerfile'a ekle:
-    RUN apt-get update && apt-get install -y --no-install-recommends \
-        tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng poppler-utils \
-        && rm -rf /var/lib/apt/lists/*
+Docker imajında bu paketler zaten kurulu (`Dockerfile.api`).
 
 Kontrol:
     tesseract --version && tesseract --list-langs   # tur ve eng görünmeli

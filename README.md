@@ -185,6 +185,8 @@ docker compose up -d --build
 * **FastAPI Swagger Documentation:** `http://localhost:8000/docs`
 * **Health Check:** `http://localhost:8000/health/ready`
 
+More: [Docker guide](docs/docker.md) · [File formats and OCR](docs/formats-ocr.md)
+
 ---
 
 ## 📂 Project Directory Structure

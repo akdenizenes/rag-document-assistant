@@ -1,6 +1,6 @@
 # Docker ile Production Kurulumu
 
-> Volume adları `<klasör-adı>_pgdata` biçimindedir; aşağıdaki `rag-assistant_` önekini proje klasörünün adıyla değiştir (`docker volume ls`).
+> Volume adları `<klasör-adı>_pgdata` biçimindedir; aşağıdaki `rag-document-assistant_` önekini proje klasörünün adıyla değiştir (`docker volume ls`).
 
 Servisler: `db` (pgvector/pgvector:pg16) → `api` (FastAPI + Tesseract/Poppler) → `frontend` (Streamlit),
 hepsi `rag_net` ağında. Veri üç named volume'da: `pgdata`, `uploads_data`, `hf_cache`.
@@ -51,7 +51,7 @@ docker compose down -v                   # durdur + TÜM VERİYİ SİL (db, yük
 # Yedek / geri yükleme
 docker compose exec -T db sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > backup.sql
 docker compose exec -T db sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' < backup.sql
-docker run --rm -v rag-assistant_uploads_data:/data -v "$PWD":/b alpine tar czf /b/uploads.tgz -C /data .
+docker run --rm -v rag-document-assistant_uploads_data:/data -v "$PWD":/b alpine tar czf /b/uploads.tgz -C /data .
 ```
 
 ## Yerel LLM (Ollama)
@@ -73,7 +73,7 @@ compose'ta `"127.0.0.1:8501:8501"` yap.
 ## Dikkat edilecekler
 - **Eski yerel kurulumdan geçiş:** önceki compose `ankane/pgvector` (PostgreSQL 15) kullanıyordu.
   Aynı `pgdata` volume'u PostgreSQL 16 ile **açılmaz** ("database files are incompatible"). Eski veriyi
-  korumak için eski kurulumdayken `pg_dump` al, `docker volume rm rag-assistant_pgdata`, yeni kurulumu başlat, dump'ı yükle.
+  korumak için eski kurulumdayken `pg_dump` al, `docker volume rm rag-document-assistant_pgdata`, yeni kurulumu başlat, dump'ı yükle.
   Yerel `./uploads/` klasöründeki dosyalar da `uploads_data` volume'una elle kopyalanmalı.
 - **Çoklu worker:** `UVICORN_WORKERS>1` iken rate limiter worker başına ayrı sayar, embedding modeli
   her worker'da ayrı yüklenir ve açılıştaki `recover_stale_documents()` diğer worker'ın işlediği belgeyi "failed" yapabilir.
