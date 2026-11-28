@@ -425,22 +425,22 @@ def render_auth_screen() -> None:
 
         with tab_register:
             with st.form("register_form"):
-                reg_name = st.text_input("Ad Soyad (isteğe bağlı)")
+                reg_name = st.text_input("Ad Soyad", max_chars=100)
                 reg_email = st.text_input("E-posta", placeholder="ornek@domain.com")
-                reg_password = st.text_input("Parola (en az 6 karakter)", type="password")
+                reg_password = st.text_input("Parola (en az 8 karakter)", type="password")
                 submit_reg = st.form_submit_button("Kayıt Ol", use_container_width=True)
 
                 if submit_reg:
-                    if not reg_email or not reg_password:
-                        st.error("E-posta ve parola alanları zorunludur.")
-                    elif len(reg_password) < 6:
-                        st.error("Parola en az 6 karakter olmalıdır.")
+                    if not reg_name.strip() or not reg_email or not reg_password:
+                        st.error("Ad Soyad, e-posta ve parola alanları zorunludur.")
+                    elif len(reg_password) < 8:
+                        st.error("Parola en az 8 karakter olmalıdır.")
                     else:
                         try:
                             data = get_api().register(
                                 email=reg_email.strip(),
                                 password=reg_password,
-                                full_name=reg_name.strip() if reg_name else None,
+                                full_name=reg_name.strip(),
                             )
                             start_session(data, remember=True)
                             flash("success", "Hesabınız başarıyla oluşturuldu!")
